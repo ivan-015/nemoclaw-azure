@@ -1,0 +1,69 @@
+# Claude Code
+# .claude/skills/ is committed (project's spec-kit toolchain).
+# Local-only Claude artifacts that may contain user-specific permissions or
+# tokens MUST stay out of version control.
+.claude/settings.local.json
+.claude/.credentials*
+.claude/cache/
+.claude/logs/
+
+# Terraform
+# State can contain secrets and resource details — never commit.
+*.tfstate
+*.tfstate.*
+*.tfstate.backup
+
+# Provider plugin cache and per-module lockfile sub-dirs.
+**/.terraform/
+crash.log
+crash.*.log
+
+# Variable files (may contain secrets, subscription IDs, principal IDs).
+# Examples are explicitly allowed.
+*.tfvars
+*.tfvars.json
+!*.tfvars.example
+!*.tfvars.json.example
+
+# Local overrides — by Terraform convention, these are developer-local.
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+
+# Terraform CLI config.
+.terraformrc
+terraform.rc
+
+# Note: .terraform.lock.hcl IS committed (pins provider versions for
+# reproducibility per Principle V).
+
+# Node (NemoClaw requires Node 22.16+; defensive even though this repo
+# does not ship Node code).
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+
+# Secrets / environment files.
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+!*.pub.key
+
+# OS / editor noise.
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Build / dist artifacts (forward-looking).
+dist/
+build/
+*.log
