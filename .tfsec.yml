@@ -1,0 +1,17 @@
+# tfsec — Terraform security scanner configuration.
+# Run via: `tfsec .` from the repo root.
+# Phase 8 task T054 enforces zero unjustified findings before the v1 PR.
+#
+# v1 expects ZERO accepted exceptions. If a future PR needs to add one,
+# every entry MUST include:
+#   - rule_id     (e.g., AVD-AZU-0017)
+#   - reason      (explicit justification, link to constitution / research / ADR)
+#   - expires     (ISO date for re-review; absent dates are not allowed)
+#
+# Example shape (DO NOT enable without a real reason):
+#   exclude:
+#     - rule_id: AVD-AZU-0017
+#       reason: "<concrete justification>"
+#       expires: "2027-04-25"
+
+exclude: []
