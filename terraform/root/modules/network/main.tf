@@ -146,8 +146,8 @@ resource "azurerm_network_security_rule" "out_cognitive_mgmt" {
   source_port_range           = "*"
   destination_port_range      = "443"
   source_address_prefix       = "VirtualNetwork"
-  destination_address_prefix  = "CognitiveServicesManagement.${var.location}"
-  description                 = "Azure AI Foundry control plane (R2). Foundry data-plane FQDN traffic falls through to AllowOutbound-Internet-443."
+  destination_address_prefix  = "CognitiveServicesManagement"
+  description                 = "Azure AI Foundry control plane (R2). Global service tag — no regional form. Data-plane traffic uses AllowOutbound-Internet-443."
 }
 
 # ─── Internet allows on narrow ports (priority 200 → 240) ─────────
@@ -316,12 +316,19 @@ data "azurerm_network_watcher" "main" {
 # spec's $80/mo PAYG ceiling without adding meaningful detection
 # value at this scope (single-operator, no compliance retention
 # obligations). Re-review if a v2 multi-operator profile lands.
+#
+# Flow log target_resource_id MUST be a VNet (not an NSG): Azure
+# retired NSG flow logs on 2025-06-30 (creation rejected by the API),
+# with the platform migrated to VNet flow logs (richer per-flow data,
+# same write path). This block now targets the VNet directly; the
+# NSG still applies to the subnet so packet-level enforcement is
+# unchanged.
 #tfsec:ignore:azure-network-retention-policy-set
 resource "azurerm_network_watcher_flow_log" "vm" {
   name                 = "flowlog-nemoclaw-vm"
   network_watcher_name = data.azurerm_network_watcher.main.name
   resource_group_name  = data.azurerm_network_watcher.main.resource_group_name
-  target_resource_id   = azurerm_network_security_group.vm.id
+  target_resource_id   = azurerm_virtual_network.main.id
   storage_account_id   = azurerm_storage_account.flowlogs.id
   enabled              = true
   version              = 2

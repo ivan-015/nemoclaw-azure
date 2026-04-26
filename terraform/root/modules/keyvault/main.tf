@@ -25,10 +25,22 @@ resource "azurerm_key_vault" "main" {
 
   sku_name = "standard"
 
-  rbac_authorization_enabled    = true
-  public_network_access_enabled = false
-  purge_protection_enabled      = true
-  soft_delete_retention_days    = var.soft_delete_retention_days
+  rbac_authorization_enabled = true
+
+  # Subtle but important: `public_network_access_enabled = false`
+  # disables the public endpoint ENTIRELY, ignoring network_acls.
+  # Even an allowlisted /32 + an allowed VNet are rejected — only
+  # Private Link gets through. Since v1 doesn't use Private Link
+  # (research R13 — service endpoint instead), we need the public
+  # endpoint enabled, then constrain it via network_acls.
+  # Effective access is identical: default_action=Deny + bypass=
+  # AzureServices + an explicit operator-IP allowlist + the vm
+  # subnet's Microsoft.KeyVault service endpoint. Anything not in
+  # those three categories is rejected at the firewall.
+  public_network_access_enabled = true
+
+  purge_protection_enabled   = true
+  soft_delete_retention_days = var.soft_delete_retention_days
 
   enabled_for_disk_encryption     = false
   enabled_for_deployment          = false
