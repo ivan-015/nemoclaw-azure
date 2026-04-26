@@ -3,8 +3,8 @@
 # Phase 8 task T053 enforces zero findings before the v1 PR.
 
 config {
-  format = "compact"
-  module = false
+  format           = "compact"
+  call_module_type = "none"
 }
 
 plugin "terraform" {

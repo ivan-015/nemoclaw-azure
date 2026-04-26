@@ -82,7 +82,7 @@ if [[ ! -d "$TF_DIR" ]]; then
   exit 2
 fi
 
-cd "$TF_DIR"
+cd "$TF_DIR" || { fail "could not cd into $TF_DIR"; exit 2; }
 
 # Best-effort fetch of the outputs we need. If terraform output fails
 # (no state, no init), report a clear error rather than crashing
@@ -312,6 +312,10 @@ else
       # sandbox PID. Pipe the secret value via stdin (`-`) and grep
       # for it in /etc/nemoclaw/, /var/lib/nemoclaw/, and the
       # NemoClaw install dir.
+      # shellcheck disable=SC2016 # single quotes are intentional —
+      # $kv must expand on the REMOTE bash (after `cat` reads stdin),
+      # not locally. The local secret value reaches the remote via
+      # the printf | tailscale-ssh pipeline, never as an argv.
       MATCHES="$(
         printf '%s' "$KEY_VALUE" \
           | tailscale ssh "$TAILNET_HOST" -- sudo bash -c \
@@ -449,8 +453,6 @@ else
       --query "instanceView.statuses[?starts_with(code, 'PowerState/')].code" \
       -o tsv 2>/dev/null | head -1 || true
   )"
-  SHUTDOWN_TIME="$(terraform output -raw 2>/dev/null \
-    | grep -E '^(auto_shutdown|shutdown)' || true)"
   if [[ -z "$POWER_STATE" ]]; then
     fail "SC-006 — could not read PowerState for $VM_NAME"
   else

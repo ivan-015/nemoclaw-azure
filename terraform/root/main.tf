@@ -115,9 +115,8 @@ module "vm" {
 
   vm_sku = var.vm_sku
 
-  vm_subnet_id               = module.network.vm_subnet_id
-  managed_identity_id        = module.identity.id
-  managed_identity_client_id = module.identity.client_id
+  vm_subnet_id        = module.network.vm_subnet_id
+  managed_identity_id = module.identity.id
 
   kv_name               = module.keyvault.name
   tailscale_secret_name = module.keyvault.tailscale_secret_name

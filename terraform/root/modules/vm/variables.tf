@@ -84,11 +84,6 @@ variable "managed_identity_id" {
   description = "Resource ID of the user-assigned MI to attach to the VM."
 }
 
-variable "managed_identity_client_id" {
-  type        = string
-  description = "Client ID of the MI. Currently unused by cloud-init (only one MI is attached) but reserved so cloud-init can use --username when multiple MIs are added later."
-}
-
 # ─── Cloud-init template inputs ───────────────────────────────────
 
 variable "kv_name" {

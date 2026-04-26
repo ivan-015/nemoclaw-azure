@@ -309,6 +309,14 @@ data "azurerm_network_watcher" "main" {
   resource_group_name = "NetworkWatcherRG"
 }
 
+# 30-day retention is a deliberate cost-control choice for the
+# personal-scope deployment (constitution Cost & Operational
+# Constraints accept the trade). Quadrupling retention to tfsec's
+# 90-day default would measurably push the deployment toward the
+# spec's $80/mo PAYG ceiling without adding meaningful detection
+# value at this scope (single-operator, no compliance retention
+# obligations). Re-review if a v2 multi-operator profile lands.
+#tfsec:ignore:azure-network-retention-policy-set
 resource "azurerm_network_watcher_flow_log" "vm" {
   name                 = "flowlog-nemoclaw-vm"
   network_watcher_name = data.azurerm_network_watcher.main.name

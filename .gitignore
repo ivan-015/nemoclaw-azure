@@ -67,3 +67,8 @@ Thumbs.db
 dist/
 build/
 *.log
+
+# Local-only narrative reference, not part of the repo's published
+# spec-kit artifacts. Keep operator-specific scratch (GH usernames,
+# absolute paths, deploy notes) out of version control.
+docs/IMPLEMENTATION_PLAN.md

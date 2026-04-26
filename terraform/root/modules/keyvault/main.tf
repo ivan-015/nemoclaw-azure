@@ -25,7 +25,7 @@ resource "azurerm_key_vault" "main" {
 
   sku_name = "standard"
 
-  enable_rbac_authorization     = true
+  rbac_authorization_enabled    = true
   public_network_access_enabled = false
   purge_protection_enabled      = true
   soft_delete_retention_days    = var.soft_delete_retention_days
@@ -115,6 +115,15 @@ resource "azurerm_monitor_diagnostic_setting" "kv_audit" {
 # MUST NOT revert the operator's seeded values back to placeholders.
 # We also ignore tags so the operator can annotate via portal/CLI.
 
+# Terraform-managed version is a PLACEHOLDER overwritten by the
+# operator via `az keyvault secret set` per quickstart §3.
+# Per-version expiry on the placeholder does not propagate to the
+# operator's overwrite (KV expiry is per-version), so tfsec's
+# azure-keyvault-ensure-secret-expiry rule is unaddressable from
+# this side. Real key rotation is via the documented restart flow
+# (quickstart §7); Tailscale's 24h ephemeral expiry covers the
+# tailscale-auth-key (docs/TAILSCALE.md §5).
+#tfsec:ignore:azure-keyvault-ensure-secret-expiry
 resource "azurerm_key_vault_secret" "foundry_api_key" {
   name         = "foundry-api-key"
   key_vault_id = azurerm_key_vault.main.id
@@ -145,6 +154,10 @@ resource "azurerm_key_vault_secret" "foundry_api_key" {
   }
 }
 
+# Same reasoning as foundry_api_key above; placeholder overwritten
+# by operator. Tailscale-side 24h ephemeral expiry is the actual
+# mitigation (docs/TAILSCALE.md §5).
+#tfsec:ignore:azure-keyvault-ensure-secret-expiry
 resource "azurerm_key_vault_secret" "tailscale_auth_key" {
   name         = "tailscale-auth-key"
   key_vault_id = azurerm_key_vault.main.id

@@ -71,8 +71,10 @@ provider "azurerm" {
 
     virtual_machine {
       delete_os_disk_on_deletion     = true
-      graceful_shutdown              = false
       skip_shutdown_and_force_delete = false
+      # graceful_shutdown removed: deprecated in azurerm v4, removed
+      # in v5. Default behavior is unchanged (graceful shutdown when
+      # the VM is asked to deallocate).
     }
   }
 }

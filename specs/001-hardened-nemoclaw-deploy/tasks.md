@@ -23,7 +23,7 @@ independently-verifiable increment.
 - **[P]**: Can run in parallel (different files, no dependencies on
   incomplete tasks in this list)
 - **[Story]**: Maps to spec.md user stories (US1, US2, US3, US4, US5)
-- File paths are absolute under the repo root (`/Users/ivanavr/Documents/personal/nemoclaw-azure`).
+- File paths are absolute under the repo root.
 
 ---
 

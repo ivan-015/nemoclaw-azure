@@ -66,15 +66,27 @@ pattern Principle II names as permitted: a just-in-time tmpfs file
 with restrictive permissions, deleted before the service reaches
 steady state.
 
-- `ExecStartPre=/usr/local/bin/nemoclaw-credential-handoff` fetches
+- `ExecStartPre=+/usr/local/bin/nemoclaw-credential-handoff` fetches
   the key from Key Vault using the VM's user-assigned managed identity
-  (no static credential involved).
+  (no static credential involved). The leading `+` runs the handoff
+  with full privileges, bypassing the unit's `User=nemoclaw` and the
+  filesystem-protection sandbox below; required because the script
+  writes into `/run/nemoclaw` (`0750 root:nemoclaw`) and chowns the
+  resulting env file to nemoclaw:nemoclaw. Only the handoff hook is
+  privileged; the main `ExecStart=` still runs as `nemoclaw` with the
+  full sandbox applied. See `contracts/credential-handoff.md` §1.
 - The script writes `OPENAI_API_KEY=<value>` to `/run/nemoclaw/env`
   with mode `0400`, owned by `nemoclaw:nemoclaw`. `/run` is tmpfs
   (RAM-backed, not on disk).
-- The unit's `EnvironmentFile=/run/nemoclaw/env` consumes it.
-- `ExecStartPost=/bin/rm -f /run/nemoclaw/env` unlinks it.
-- Steady-state on-disk presence of the secret: zero.
+- The unit's `EnvironmentFile=/run/nemoclaw/env` consumes it (read by
+  systemd PID 1 as root before the main process forks).
+- `ExecStartPost=+/bin/rm -f /run/nemoclaw/env` unlinks it. The `+`
+  is required for the same `/run/nemoclaw` directory-permissions
+  reason as ExecStartPre.
+- Steady-state on-disk presence of the secret: zero. The tmpfs file's
+  total lifetime is the wall-clock between ExecStartPre completing
+  and ExecStart= entering the "active" state — typically well under
+  one second.
 
 ### Network: Tailscale-only ingress, default-deny NSG
 
@@ -138,7 +150,8 @@ steady state.
 | Risk | Why accepted at v1 | Upgrade path |
 |---|---|---|
 | **NemoClaw zero-day in the sandbox layer** | The whole project leans on NemoClaw's sandbox holding. A zero-day in Landlock/seccomp/namespace handling defeats Principle II's load-bearing mitigation. | Maintain pinned-version discipline + NemoClaw upstream advisory monitoring. v2: subscribe to NemoClaw security mailing list; CVE alerts. |
-| **NemoClaw host process holds `OPENAI_API_KEY` in its environ for its lifetime** | This is the design (NemoClaw's own architecture treats it as acceptable: host has the key, sandbox does not). | Out of scope to mitigate further at v1; would require NemoClaw upstream changes. |
+| **NemoClaw host process holds `OPENAI_API_KEY` in its environ for its lifetime** | This is the design (NemoClaw's own architecture treats it as acceptable: host has the key, sandbox does not). The host-process environ is readable to root and the same uid only — `/proc/<host-pid>/environ` requires uid match or root. | Out of scope to mitigate further at v1; would require NemoClaw upstream changes (e.g. memfd-based credential injection that drops from environ post-startup). |
+| **Tmpfs handoff file briefly readable by root (only) between ExecStartPre and ExecStartPost** | The file mode is `0400 nemoclaw:nemoclaw`, so only nemoclaw and root can read. nemoclaw is NemoClaw's own uid (legitimately needs the value). Root is the host's privilege boundary by definition; if root is compromised, the threat model has already failed. The file's wall-clock lifetime is sub-second between the two hooks. | Acceptable at v1 per Principle II's named pattern. v2 candidate: switch to a memfd / pidfd-based handoff that never touches the filesystem at all, if NemoClaw upstream adds support. |
 | **Persisted KV-side Tailscale auth key for ≤ 24h** | Tailscale's own 24h ephemeral expiry makes the persisted value useless after the window; explicit purge would require a flaky `local-exec` `null_resource`. | v2: `null_resource` running `az keyvault secret delete` on the auth key after `tailscale up` reports success in cloud-init. |
 | **Manual Tailscale node revocation on `terraform destroy`** | Automated revocation requires a Tailscale API token, which itself becomes a long-lived credential to manage. | v2: introduce a Tailscale API key in Key Vault and a `null_resource` provisioner that revokes the node on destroy. |
 | **Tailscale account / coordination plane compromise** | The operator's tailnet is the sole ingress path; if Tailscale itself is breached, the threat model changes. | Out of repo scope. Operator should enable Tailscale 2FA, use SSO with their primary identity provider, and review tailnet ACLs periodically. |
