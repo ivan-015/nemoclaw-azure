@@ -2,7 +2,7 @@
 # Cloud-init bootstrap for NemoClaw VM.
 #
 # Rendered by Terraform via templatefile() in
-# terraform/root/modules/vm/main.tf. The placeholders ${...} below
+# terraform/root/modules/vm/main.tf. The placeholders $${...} below
 # are substituted at apply time with values from:
 #   - the keyvault module (kv_name)
 #   - the operator's tfvars (nemoclaw_version, foundry_endpoint,
@@ -60,7 +60,7 @@ write_files:
   # Rendered systemd unit. At US1 ExecStartPre is /bin/true (US2 wires
   # the real credential handoff). The Terraform-rendered content is
   # base64-encoded so cloud-init does not double-process the unit's
-  # `${...}` directives (systemd's own template syntax).
+  # `$${...}` directives (systemd's own template syntax).
   - path: /etc/systemd/system/nemoclaw.service
     permissions: '0644'
     owner: root:root

@@ -10,7 +10,7 @@ Group=nemoclaw
 
 # ─── Environment (templated by Terraform at apply time) ──────────────
 #
-# `${kv_name}` and `${foundry_*}` are substituted by templatefile()
+# `$${kv_name}` and `$${foundry_*}` are substituted by templatefile()
 # in terraform/root/modules/vm/main.tf. The credential-handoff
 # binary reads KV_NAME / FOUNDRY_SECRET_NAME / OUT_FILE; NemoClaw
 # itself reads FOUNDRY_ENDPOINT / FOUNDRY_API_VERSION (and
