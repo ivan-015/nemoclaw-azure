@@ -70,7 +70,7 @@ write_files:
 runcmd:
   # ── 01: Tailscale ────────────────────────────────────────────────
   - |
-    set -euo pipefail
+    set -eu
     export KV_NAME='${kv_name}'
     export TAILSCALE_SECRET='${tailscale_secret_name}'
     export TAILSCALE_TAG='${tailscale_tag}'
@@ -79,24 +79,24 @@ runcmd:
 
   # ── 02: Docker ───────────────────────────────────────────────────
   - |
-    set -euo pipefail
+    set -eu
     export DOCKER_VERSION='${docker_version}'
     /opt/nemoclaw-bootstrap/02-docker.sh
 
   # ── 03: Node ─────────────────────────────────────────────────────
   - |
-    set -euo pipefail
+    set -eu
     export NODE_MAJOR='${node_major}'
     /opt/nemoclaw-bootstrap/03-node.sh
 
   # ── 04: Credential handoff (US1 stub; US2 overwrites in T032) ────
   - |
-    set -euo pipefail
+    set -eu
     /opt/nemoclaw-bootstrap/04-credential-handoff.sh
 
   # ── 05: NemoClaw install (enables but does NOT start the unit) ───
   - |
-    set -euo pipefail
+    set -eu
     export NEMOCLAW_VERSION='${nemoclaw_version}'
     export NEMOCLAW_RELEASE_URL_BASE='${nemoclaw_release_url_base}'
     export FOUNDRY_ENDPOINT='${foundry_endpoint}'
