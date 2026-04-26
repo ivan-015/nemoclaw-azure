@@ -227,18 +227,32 @@ Useful for postmortems on a deallocated VM.
 
 Tailscale outages, account suspension, or coordination-plane bugs
 make the tailnet unusable. The deploy continues running NemoClaw's
-existing work; only the operator's *access* is impaired.
+existing work; only the operator's *access* is impaired. Two
+no-network recovery paths cover every variant — neither requires
+opening any inbound NSG rule:
+
+- **Run Command** (§7a above) — one-shot shell snippets executed via
+  the Azure VM agent. The first thing to reach for; works as long
+  as the VM is running and the agent is healthy. Preferred for
+  diagnostics, restarts, and re-running cloud-init scripts.
+- **Serial console** (§7b above) — interactive console attached via
+  the Azure portal. Use when Run Command isn't responsive (kernel
+  panic, agent down, cloud-init hung pre-getty) or when you need a
+  real terminal to step through recovery interactively.
 
 Recovery sequence:
 
 1. Check <https://status.tailscale.com> for an active incident.
 2. If the issue is on Tailscale's side, wait it out — the VM is
-   fine. Use Run Command (§7a) for any in-flight admin needs.
+   fine. Use **Run Command** (§7a) for any in-flight admin needs.
 3. If the issue is on the VM side (`tailscaled` crashed, registration
-   expired, etc.), use Run Command to diagnose and recover.
+   expired, etc.), use **Run Command** to diagnose and recover. If
+   `tailscaled` won't even respond to `systemctl restart` over Run
+   Command, escalate to the **serial console** (§7b) and inspect
+   the daemon's state interactively.
 4. If the issue is on the *account* side (you got logged out of your
    Tailscale account), log back in on your laptop; the tailnet
-   resumes.
+   resumes. The VM doesn't care.
 5. Last resort: `terraform destroy` + redeploy with a fresh auth key.
    Lost work: ephemeral state on the VM (NemoClaw conversation
    history, transient state). Persistent state in Key Vault and

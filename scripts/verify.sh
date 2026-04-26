@@ -553,6 +553,42 @@ else
   fi
 fi
 
+# ─── EC-debug: no-network debug paths still work ───────────────────
+#
+# US4 acceptance scenario: with Tailscale daemon manually stopped,
+# Run Command must still be able to reach the VM and bring Tailscale
+# back. We deliberately do NOT auto-run this — stopping tailscaled
+# severs the operator's own session if they're connected via
+# `tailscale ssh`. Documented as an operator's-manual smoke test.
+
+section "EC-debug — Run Command works without Tailscale (manual)"
+
+if [[ -z "$RG_NAME" || -z "$VM_NAME" ]]; then
+  skip "EC-debug — need terraform outputs"
+else
+  cat <<MANUAL
+[SKIP] EC-debug — manual operator smoke test (DO NOT run mid-session if you're SSH'd via Tailscale):
+
+  # 1. Stop tailscaled via Run Command (severs the tailnet — intentional).
+  az vm run-command invoke -g "$RG_NAME" -n "$VM_NAME" \\
+    --command-id RunShellScript \\
+    --scripts "systemctl stop tailscaled"
+
+  # 2. Confirm Run Command itself still reaches the VM (US4 acceptance):
+  az vm run-command invoke -g "$RG_NAME" -n "$VM_NAME" \\
+    --command-id RunShellScript \\
+    --scripts "uptime; systemctl status tailscaled --no-pager"
+
+  # 3. Bring Tailscale back via Run Command (recovery path):
+  az vm run-command invoke -g "$RG_NAME" -n "$VM_NAME" \\
+    --command-id RunShellScript \\
+    --scripts "systemctl start tailscaled && sleep 3 && tailscale status"
+
+See docs/TAILSCALE.md §8 and quickstart.md §8 for the full no-network debug walkthrough.
+MANUAL
+  SKIP_COUNT=$((SKIP_COUNT + 1))
+fi
+
 # ─── Summary ───────────────────────────────────────────────────────
 
 section "Summary"

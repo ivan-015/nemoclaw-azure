@@ -293,60 +293,151 @@ isn't blocked by the soft-deleted predecessor.
 
 ---
 
-## 8. Troubleshooting
+## 8. Troubleshooting (no-network debug walkthrough)
+
+When something on the VM is broken, every diagnostic path below
+uses **only the Azure control plane** — no inbound NSG rule, no
+public IP, no Tailscale dependency. Three tiers, increasing in
+severity:
+
+| Tier | Path | When to use |
+|---|---|---|
+| 1 | `az vm run-command invoke` | VM running, Linux booted, only userland is broken |
+| 2 | `az vm boot-diagnostics get-boot-log` | VM running but kernel/cloud-init noise needs reading |
+| 3 | Azure portal → VM → "Serial console" | VM kernel broken or cloud-init hung; need an interactive console |
+
+Set the variables once:
+
+```bash
+RG=$(terraform output -raw resource_group_name)
+VM=$(terraform output -raw vm_name)
+```
 
 ### "I can't reach the VM via Tailscale"
 
 ```bash
-# Is the VM running?
-az vm get-instance-view -g <rg> -n <vm> --query 'instanceView.statuses[*].code'
+# Is the VM even running? Look for PowerState/running.
+az vm get-instance-view -g "$RG" -n "$VM" \
+  --query "instanceView.statuses[?starts_with(code, 'PowerState/')].code" -o tsv
 
-# Is Tailscale healthy on the VM? (uses the no-network debug path)
-az vm run-command invoke -g <rg> -n <vm> \
+# Is Tailscale healthy on the VM?
+az vm run-command invoke -g "$RG" -n "$VM" \
   --command-id RunShellScript \
-  --scripts "tailscale status; systemctl status tailscaled"
+  --scripts "tailscale status; systemctl status tailscaled --no-pager"
+
+# Restart Tailscale if the daemon is unhealthy.
+az vm run-command invoke -g "$RG" -n "$VM" \
+  --command-id RunShellScript \
+  --scripts "systemctl restart tailscaled && sleep 3 && tailscale status"
 ```
+
+If Tailscale's coordination plane itself is down, the daemon won't
+recover — see `docs/TAILSCALE.md` §8 ("When Tailscale itself is
+broken") for the broader recovery sequence.
 
 ### "Cloud-init failed during the apply"
 
-```bash
-# Read cloud-init logs without SSH
-az vm run-command invoke -g <rg> -n <vm> \
-  --command-id RunShellScript \
-  --scripts "cat /var/log/cloud-init-output.log; cat /var/log/cloud-init.log"
+Read the logs without ever opening a port. Cloud-init writes two
+files; both are useful:
 
-# If the VM is fully borked, attach the serial console:
-az vm boot-diagnostics get-boot-log -g <rg> -n <vm>
-# Or in the portal: VM → Help → Serial console
+```bash
+# Combined stdout/stderr from runcmd: scripts (most diagnostic).
+az vm run-command invoke -g "$RG" -n "$VM" \
+  --command-id RunShellScript \
+  --scripts "cat /var/log/cloud-init-output.log"
+
+# The structured cloud-init log itself.
+az vm run-command invoke -g "$RG" -n "$VM" \
+  --command-id RunShellScript \
+  --scripts "tail -n 300 /var/log/cloud-init.log"
 ```
+
+If cloud-init hung early enough that even Run Command isn't
+available (rare — Run Command runs via the Azure VM agent, which is
+up before cloud-init's user-space stage), fall back to the boot log:
+
+```bash
+az vm boot-diagnostics get-boot-log -g "$RG" -n "$VM"
+```
+
+…or attach the serial console interactively in the portal:
+**VM blade → Help → Serial console**. The console shows the kernel
+ring buffer + getty prompt; with a working `cloud-init` user
+account you can log in and inspect the half-configured system.
 
 ### "NemoClaw won't start (credential handoff failure)"
 
 ```bash
-tailscale ssh <vm> -- "
-  systemctl status nemoclaw
-  journalctl -u nemoclaw --since '5 minutes ago'
+# Tailscale path (preferred — interactive shell):
+tailscale ssh "$(terraform output -raw vm_tailnet_hostname)" -- "
+  systemctl status nemoclaw --no-pager
+  journalctl -u nemoclaw --since '5 minutes ago' --no-pager
 "
+
+# No-Tailscale path (Run Command):
+az vm run-command invoke -g "$RG" -n "$VM" \
+  --command-id RunShellScript \
+  --scripts "systemctl status nemoclaw --no-pager; journalctl -u nemoclaw -n 200 --no-pager"
 ```
 
-Common causes:
+Common causes (in roughly observed-frequency order):
+
+- **`foundry-api-key` still the Terraform PLACEHOLDER**: the
+  credential-handoff script rejects it. Run
+  `az keyvault secret set --vault-name <kv> --name foundry-api-key --value <real-key>`
+  then `systemctl restart nemoclaw` (via Run Command if Tailscale is
+  also down).
 - **MI not assigned**: `az login --identity` fails. Check
-  `az vm identity show -g <rg> -n <vm>`.
+  `az vm identity show -g "$RG" -n "$VM"`.
 - **MI lacks RBAC**: KV returns 403. Check the `Key Vault Secrets User`
-  assignment for the MI on the KV resource scope.
+  assignment on the KV resource scope.
 - **KV unreachable**: KV network ACL doesn't allow the `vm` subnet.
   Check `az keyvault show -n <kv> --query 'properties.networkAcls'`.
-- **Foundry secret missing or wrong name**: `az keyvault secret list -n <kv>`.
+- **Foundry secret missing or wrong name**:
+  `az keyvault secret list --vault-name <kv> --query "[].name" -o tsv`.
+
+### "I need a shell on the VM but Tailscale is down"
+
+Run Command runs as root and accepts any shell snippet — it's the
+no-network equivalent of an SSH session for one-shot commands:
+
+```bash
+az vm run-command invoke -g "$RG" -n "$VM" \
+  --command-id RunShellScript \
+  --scripts "<your shell snippet>"
+```
+
+For a proper interactive shell, attach the serial console
+(portal → VM → Help → Serial console). It logs in as the cloud-init
+admin user (`azureuser` by default, but in this deploy that account
+has no password — you'll need to set one via Run Command first if
+serial console interactivity matters):
+
+```bash
+# One-time: set a password on azureuser so serial console accepts a login
+# (not needed for Run Command itself).
+az vm run-command invoke -g "$RG" -n "$VM" \
+  --command-id RunShellScript \
+  --scripts "echo 'azureuser:<temporary-strong-password>' | chpasswd"
+```
+
+Don't leave that password set after the debug session — clear it
+with `passwd -d azureuser` when done.
 
 ### "Cost is higher than expected"
 
 ```bash
 # What's actually running?
-az resource list -g <rg> --query "[?type!='Microsoft.Network/networkWatchers'].[type,name]" -o table
+az resource list -g "$RG" \
+  --query "[?type!='Microsoft.Network/networkWatchers'].[type,name]" -o table
 
-# Is auto-shutdown firing?
-az monitor activity-log list -g <rg> --max-events 20 \
+# Is auto-shutdown firing? (last 20 events)
+az monitor activity-log list -g "$RG" --max-events 20 \
   --query "[?operationName.value=='Microsoft.Compute/virtualMachines/deallocate/action'].{when:eventTimestamp,who:caller}"
+
+# Forecast for the rest of the month — opens the Cost Management view
+# scoped to this RG:
+echo "https://portal.azure.com/#view/Microsoft_Azure_CostManagement/Menu/~/costanalysis/scope/%2Fsubscriptions%2F$(az account show --query id -o tsv)%2FresourceGroups%2F$RG"
 ```
 
 ---
