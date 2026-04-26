@@ -160,14 +160,14 @@ EOF
 chown "$NEMOCLAW_USER:$NEMOCLAW_GROUP" "$NEMOCLAW_CONFIG_DIR/config.yaml"
 chmod 0640 "$NEMOCLAW_CONFIG_DIR/config.yaml"
 
-# ─── systemd unit (US1 placeholder; US2 swaps in real handoff) ────
+# ─── systemd unit ─────────────────────────────────────────────────
 #
 # The unit file itself is rendered by Terraform (templatefile() over
 # nemoclaw.service.tpl) and dropped into place by cloud-init's
 # write_files BEFORE this script runs. Here we just reload + enable.
-# At US1 the unit's ExecStartPre is /bin/true and we explicitly do
-# NOT start the service. US2 (T033) replaces ExecStartPre with the
-# credential handoff and starts the unit.
+# Starting the unit is deferred until after the doctor smoke test
+# below so a packaging bug in the tarball surfaces as a clear
+# "doctor failed" rather than a tangle of systemd restart-loop noise.
 
 if [[ ! -f "$NEMOCLAW_SERVICE_FILE" ]]; then
   echo "[05-nemoclaw] FATAL: $NEMOCLAW_SERVICE_FILE missing." >&2
@@ -177,7 +177,7 @@ fi
 
 systemctl daemon-reload
 systemctl enable nemoclaw.service
-echo "[05-nemoclaw] unit enabled (NOT started — US2 wires the credential handoff)"
+echo "[05-nemoclaw] unit enabled"
 
 # ─── Smoke test ───────────────────────────────────────────────────
 #
@@ -205,17 +205,48 @@ fi
 ln -sf "$NEMOCLAW_BIN" /usr/local/bin/nemoclaw
 
 echo "[05-nemoclaw] running smoke test: nemoclaw doctor"
+# `nemoclaw doctor` here runs as the nemoclaw user WITHOUT
+# OPENAI_API_KEY in its environ — this is an install-integrity
+# check, not a runtime check. If upstream's doctor command treats a
+# missing API key as fatal, we accept it as a soft warning here;
+# the runtime check is the systemctl start a few lines below, which
+# DOES have OPENAI_API_KEY (via the credential handoff +
+# EnvironmentFile=).
 if sudo -u "$NEMOCLAW_USER" \
      env HOME="$NEMOCLAW_DATA_DIR" PATH="$PATH" \
      "$NEMOCLAW_BIN" doctor; then
   echo "[05-nemoclaw] doctor passed."
 else
   echo "[05-nemoclaw] WARNING: \`nemoclaw doctor\` returned non-zero." >&2
-  echo "[05-nemoclaw] At US1 the credential handoff is not yet wired,"  >&2
-  echo "[05-nemoclaw] so doctor may fail on the OPENAI_API_KEY check."  >&2
-  echo "[05-nemoclaw] If the failure is anything OTHER than a missing"  >&2
-  echo "[05-nemoclaw] API key, this is a real problem — investigate"    >&2
-  echo "[05-nemoclaw] before declaring US1 done."                       >&2
+  echo "[05-nemoclaw] If the failure is anything OTHER than a missing" >&2
+  echo "[05-nemoclaw] API key, this is a real problem — investigate"   >&2
+  echo "[05-nemoclaw] via journalctl -u nemoclaw before using the"     >&2
+  echo "[05-nemoclaw] deployment."                                     >&2
 fi
+
+# ─── Start the service (US2 / T033) ───────────────────────────────
+#
+# At US2 the credential handoff is wired via ExecStartPre=+ — the
+# Foundry API key reaches NemoClaw's host process at startup via the
+# tmpfs handoff documented in contracts/credential-handoff.md.
+# Starting the unit triggers the handoff for the first time; the
+# operator's `verify.sh` then runs SC-004 / SC-008 to confirm the
+# tooth-check passes.
+#
+# We don't `--wait` here: cloud-init's runcmd is single-threaded and
+# we don't want the whole bootstrap to block on Type=notify if
+# NemoClaw's notify support is flaky. Type=notify with a missing
+# ready-signal would hang the unit until DefaultTimeoutStartSec
+# (90s) anyway — the operator sees the eventual state via
+# verify.sh + journalctl.
+echo "[05-nemoclaw] starting nemoclaw.service (credential handoff fires here)"
+systemctl start nemoclaw.service || {
+  echo "[05-nemoclaw] WARNING: systemctl start nemoclaw.service returned non-zero." >&2
+  echo "[05-nemoclaw] Inspect via \`journalctl -u nemoclaw --no-pager -n 200\`."   >&2
+  echo "[05-nemoclaw] Common causes: foundry-api-key still PLACEHOLDER in KV"     >&2
+  echo "[05-nemoclaw] (run \`az keyvault secret set\` per quickstart.md §3,"      >&2
+  echo "[05-nemoclaw] then \`systemctl restart nemoclaw\`); MI lacks Secrets-User" >&2
+  echo "[05-nemoclaw] RBAC; KV network ACL blocks the VM subnet."                 >&2
+}
 
 echo "[05-nemoclaw] install complete at $NEMOCLAW_VERSION."

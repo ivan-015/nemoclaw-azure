@@ -20,8 +20,17 @@ Principle II as a permitted mediation channel:
 - **Owner / mode**: `root:root`, `0755`
 - **Installed by**: cloud-init `04-credential-handoff.sh` (write_files +
   chmod)
-- **Executed by**: systemd, as `ExecStartPre=` for `nemoclaw.service`,
-  as the unit's `User=nemoclaw`
+- **Executed by**: systemd as `ExecStartPre=+/usr/local/bin/nemoclaw-credential-handoff`
+  for `nemoclaw.service`. The leading `+` runs the handoff with full
+  privileges (root, no sandbox), bypassing `User=nemoclaw` and the
+  unit's `ProtectSystem=`/`ProtectHome=`/`ReadWritePaths=` directives.
+  Required because (a) `/run/nemoclaw` is mode `0750 root:nemoclaw` —
+  group bits are `r-x`, so only root can create or unlink files
+  inside it; (b) `install -m 0400 -o nemoclaw -g nemoclaw` needs
+  `CAP_CHOWN` to chown to nemoclaw; (c) `az login --identity` writes
+  its token cache under `/root/.azure`, which `ProtectHome=true`
+  would otherwise hide. Main `ExecStart=` still runs as `nemoclaw`
+  with the full sandbox applied.
 
 **Script contract** (pseudocode; the real script ships in
 `cloud-init/scripts/04-credential-handoff.sh`):
@@ -108,10 +117,10 @@ Environment=OUT_FILE=/run/nemoclaw/env
 Environment=FOUNDRY_ENDPOINT=${foundry_endpoint}
 Environment=FOUNDRY_API_VERSION=${foundry_api_version}
 
-ExecStartPre=/usr/local/bin/nemoclaw-credential-handoff
+ExecStartPre=+/usr/local/bin/nemoclaw-credential-handoff
 EnvironmentFile=/run/nemoclaw/env
-ExecStart=/usr/local/bin/openshell --some-args ...
-ExecStartPost=/bin/rm -f /run/nemoclaw/env
+ExecStart=/usr/local/bin/nemoclaw serve --config /etc/nemoclaw/config.yaml
+ExecStartPost=+/bin/rm -f /run/nemoclaw/env
 
 # Hardening
 ProtectSystem=strict

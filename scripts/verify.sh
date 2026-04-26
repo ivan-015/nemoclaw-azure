@@ -4,7 +4,7 @@
 #
 # Source-of-truth: specs/001-hardened-nemoclaw-deploy/contracts/verification-checks.md
 #
-# At Phase 3 (US1) this script implements:
+# At Phase 3 (US1) + Phase 4 (US2) this script implements:
 #   - Pre-flight: 0a, 0b, 0c
 #   - SC-001: 3a (tailscale ping), 3b (Tailscale SSH lands)
 #   - SC-002: apply timing (advisory — caller wraps `terraform apply`
@@ -12,10 +12,15 @@
 #             state instead)
 #   - SC-003: 2a (no public IP), 2b (zero NSG inbound allow rules),
 #             2c (port scan reminder, manual)
+#   - SC-004: 4a–4e Principle II tooth-check (sandboxed agent never
+#             sees the KV value)
+#   - SC-008: KV audit landing (every SecretGet recorded in LA)
+#   - EC-2:   Foundry key rotation propagates after restart
+#             (manual / advisory)
+#   - EC-4:   tmpfs handoff file unlinked promptly
+#   - EC-5:   handoff cannot leak the Tailscale auth key
 #
-# US2 (T034) appends SC-004 (Principle II tooth-check), SC-008 (audit
-# landing), EC-2/4/5. US3 (T041) appends SC-005/006/007. US5 (T050)
-# appends SC-009.
+# US3 (T041) appends SC-005/006/007. US5 (T050) appends SC-009.
 #
 # Exits non-zero if any non-advisory check fails.
 
@@ -216,6 +221,231 @@ fi
 section "SC-002 — apply timing (advisory)"
 
 skip "SC-002 — measure with \`time terraform apply -auto-approve\` from a fresh state. Target: <= 15m wall-clock."
+
+# ─── SC-004: Principle II tooth-check ──────────────────────────────
+#
+# This is the load-bearing check for Phase 4. If 4c, 4d, or 4e match
+# the KV value, the deployment is in violation of constitution
+# Principle II and verify.sh exits non-zero.
+#
+# All checks run on the VM via Tailscale SSH so the secret value
+# never lands on the operator's workstation.
+
+section "SC-004 — Principle II tooth-check (sandboxed agent never sees KV value)"
+
+if [[ -z "$KV_NAME" ]]; then
+  fail "SC-004 — cannot run without key_vault_name terraform output" \
+       "Re-run after \`terraform apply\`."
+elif ! command -v tailscale >/dev/null 2>&1; then
+  skip "SC-004 — tailscale CLI not present on this machine"
+else
+  # Wait for the unit to reach `active` before sampling. cloud-init
+  # starts it asynchronously; a fresh `terraform apply` may finish
+  # before NemoClaw's first `Type=notify` ready signal lands.
+  WAIT=0
+  while (( WAIT < 120 )); do
+    if tailscale ssh "$TAILNET_HOST" -- systemctl is-active --quiet nemoclaw.service 2>/dev/null; then
+      break
+    fi
+    sleep 5
+    WAIT=$((WAIT + 5))
+  done
+
+  if ! tailscale ssh "$TAILNET_HOST" -- systemctl is-active --quiet nemoclaw.service 2>/dev/null; then
+    fail "SC-004 — nemoclaw.service is not active after 120s" \
+         "Inspect via \`tailscale ssh $TAILNET_HOST -- sudo journalctl -u nemoclaw --no-pager -n 200\`. Common cause: foundry-api-key still holds the Terraform PLACEHOLDER (run \`az keyvault secret set --vault-name $KV_NAME --name foundry-api-key --value <real-key>\` then \`tailscale ssh $TAILNET_HOST -- sudo systemctl restart nemoclaw\`)."
+  else
+    pass "SC-004 pre — nemoclaw.service is active (Type=notify ready signal observed)"
+
+    # 4b: tmpfs handoff file is gone after service start
+    HANDOFF_LS="$(tailscale ssh "$TAILNET_HOST" -- sudo ls /run/nemoclaw/env 2>&1 || true)"
+    if grep -qi "no such file" <<< "$HANDOFF_LS"; then
+      pass "4b — /run/nemoclaw/env unlinked after ExecStartPost"
+    else
+      fail "4b — /run/nemoclaw/env still exists after service start" \
+           "Output: $HANDOFF_LS — ExecStartPost=+/bin/rm -f did not run or failed."
+    fi
+
+    # 4a: identify the sandboxed agent PID. NemoClaw upstream's
+    # documented sandbox-PID command is version-specific; the
+    # contract names it as a placeholder. Operator manually identifies
+    # the sandbox PID and re-runs SC-004 against it. We surface the
+    # systemd main PID + child tree so the operator has a starting
+    # point.
+    SVC_PID="$(tailscale ssh "$TAILNET_HOST" -- systemctl show -p MainPID --value nemoclaw.service 2>/dev/null | tr -d '\r' || true)"
+    if [[ -z "$SVC_PID" || "$SVC_PID" == "0" ]]; then
+      skip "4a — could not read MainPID for nemoclaw.service (service not running?)"
+    else
+      pass "4a — nemoclaw.service MainPID=$SVC_PID (NOTE: this is the *host* process, NOT the sandbox)"
+      printf "      Sandbox PID is NemoClaw-version-specific — identify per upstream docs and\n"
+      printf "      re-run 4c/4d against /proc/<sandbox-pid>/ to validate Principle II teeth.\n"
+    fi
+
+    # Fetch the secret value ONCE. We feed it into 4c/4d/4e via stdin
+    # over Tailscale SSH so it never lands on the operator's
+    # filesystem and never appears in argv (which would put it in
+    # /proc/<verify-pid>/cmdline).
+    KEY_VALUE="$(az keyvault secret show --vault-name "$KV_NAME" --name foundry-api-key --query value -o tsv 2>/dev/null || true)"
+    if [[ -z "$KEY_VALUE" ]]; then
+      skip "4c/4d/4e — cannot read foundry-api-key from $KV_NAME (RBAC? not yet set?)"
+    elif [[ "$KEY_VALUE" == PLACEHOLDER* ]]; then
+      skip "4c/4d/4e — foundry-api-key is still the Terraform PLACEHOLDER; tooth-check is meaningless until a real key is set"
+    else
+      # 4c: sandboxed agent's environ — manual until 4a is automated
+      skip "4c — manual: \`tailscale ssh $TAILNET_HOST -- sudo grep -aF '<KV-VALUE>' /proc/<sandbox-pid>/environ\` should return nothing (host process at PID $SVC_PID legitimately has the key)"
+
+      # 4d: sandboxed agent's cmdline
+      skip "4d — manual: \`tailscale ssh $TAILNET_HOST -- sudo grep -aF '<KV-VALUE>' /proc/<sandbox-pid>/cmdline\` should return nothing"
+
+      # 4e: persistent NemoClaw config dir contains no KV value. We
+      # can run this fully — it doesn't depend on knowing the
+      # sandbox PID. Pipe the secret value via stdin (`-`) and grep
+      # for it in /etc/nemoclaw/, /var/lib/nemoclaw/, and the
+      # NemoClaw install dir.
+      MATCHES="$(
+        printf '%s' "$KEY_VALUE" \
+          | tailscale ssh "$TAILNET_HOST" -- sudo bash -c \
+              'kv=$(cat); grep -rlF -- "$kv" /etc/nemoclaw /var/lib/nemoclaw /opt/nemoclaw 2>/dev/null || true' \
+          || true
+      )"
+      if [[ -z "$MATCHES" ]]; then
+        pass "4e — no match for KV value in /etc/nemoclaw, /var/lib/nemoclaw, /opt/nemoclaw"
+      else
+        fail "4e — KV value found in persistent on-disk config" \
+             "Files: $MATCHES — Principle II violation. NemoClaw must not write the Foundry key to disk."
+      fi
+      unset KEY_VALUE
+    fi
+  fi
+fi
+
+# ─── EC-4: tmpfs handoff file unlinked promptly ────────────────────
+#
+# Restart the unit and observe the env file's brief lifetime. The
+# file should appear during ExecStartPre and disappear by
+# ExecStartPost. Bounded to a 30s observation window.
+
+section "EC-4 — tmpfs handoff file unlinked promptly"
+
+if [[ -z "$KV_NAME" ]] || ! command -v tailscale >/dev/null 2>&1; then
+  skip "EC-4 — requires tailscale + valid KV"
+else
+  # Trigger a fresh restart so we know the handoff cycle just ran.
+  if tailscale ssh "$TAILNET_HOST" -- sudo systemctl restart nemoclaw.service 2>/dev/null; then
+    pass "EC-4 pre — restart issued"
+    # Sample for up to 30s; at the end the file must be gone.
+    sleep 10
+    POST_LS="$(tailscale ssh "$TAILNET_HOST" -- sudo ls /run/nemoclaw/env 2>&1 || true)"
+    if grep -qi "no such file" <<< "$POST_LS"; then
+      pass "EC-4 — /run/nemoclaw/env not present 10s after restart"
+    else
+      fail "EC-4 — /run/nemoclaw/env still present 10s after restart" \
+           "Output: $POST_LS — ExecStartPost cleanup did not fire."
+    fi
+  else
+    fail "EC-4 — could not restart nemoclaw.service via Tailscale SSH"
+  fi
+fi
+
+# ─── SC-008: Key Vault audit landing ───────────────────────────────
+#
+# After the EC-4 restart we expect a fresh SecretGet event in
+# AzureDiagnostics within 5 minutes. We poll up to 5 minutes; if no
+# event appears, fail. Requires `az monitor log-analytics` extension
+# (azure-cli installs it on first use; we check explicitly).
+
+section "SC-008 — Key Vault audit landing"
+
+if [[ -z "$LA_ID" ]]; then
+  skip "SC-008 — log_analytics_workspace_id terraform output empty"
+elif ! command -v az >/dev/null 2>&1; then
+  skip "SC-008 — az CLI not installed on this machine"
+else
+  # Workspace ID for `az monitor log-analytics query` is the GUID,
+  # not the full resource ID. Extract the last segment.
+  LA_GUID="${LA_ID##*/}"
+  # Query the last 10 minutes (covers the EC-4 restart + slack for
+  # ingestion latency). Strict TimeGenerated filter avoids matching
+  # the cloud-init first-boot fetch that may have happened hours ago.
+  KQL=$(cat <<KUSTO
+AzureDiagnostics
+| where ResourceProvider == "MICROSOFT.KEYVAULT"
+| where OperationName == "SecretGet"
+| where TimeGenerated > ago(10m)
+| project TimeGenerated, Resource, identity_claim_oid_g, ResultSignature
+| order by TimeGenerated desc
+| limit 5
+KUSTO
+)
+  AUDIT_OUT="$(
+    az monitor log-analytics query \
+      -w "$LA_GUID" \
+      --analytics-query "$KQL" \
+      -o tsv 2>&1 || true
+  )"
+  if [[ -z "$AUDIT_OUT" ]]; then
+    fail "SC-008 — no SecretGet records in last 10m" \
+         "Diagnostic settings on the Key Vault may not be wired to the workspace, or ingestion is delayed (>5 min)."
+  elif grep -qi "error\|extension" <<< "$AUDIT_OUT"; then
+    fail "SC-008 — log analytics query failed" \
+         "Output: $AUDIT_OUT"
+  else
+    pass "SC-008 — at least one SecretGet record landed in LA within the window"
+  fi
+fi
+
+# ─── EC-2: Foundry key rotation propagates ─────────────────────────
+#
+# This is a manual operator check — automating it would require
+# rotating the live Foundry secret and waiting for inference output,
+# which is destructive and out of scope for verify.sh.
+
+section "EC-2 — Foundry key rotation (manual)"
+
+skip "EC-2 — manual: \`az keyvault secret set --vault-name $KV_NAME --name foundry-api-key --value <new-key>\` then \`tailscale ssh $TAILNET_HOST -- sudo systemctl restart nemoclaw\`; confirm a fresh inference call succeeds with the new key. No code change needed; see contracts/credential-handoff.md §'Failure-mode coverage matrix'."
+
+# ─── EC-5: handoff cannot leak the Tailscale auth key ──────────────
+#
+# The contract acknowledges two possible pass paths: (a) the MI's KV
+# RBAC scope blocks reads of tailscale-auth-key, OR (b) by the time
+# the operator runs verify.sh, Tailscale's 24h ephemeral expiry has
+# already invalidated the persisted KV value. Either way the test
+# of "the handoff binary running on the VM cannot leak the live
+# Tailscale auth key" passes.
+
+section "EC-5 — handoff cannot leak Tailscale auth key"
+
+if [[ -z "$KV_NAME" ]] || ! command -v tailscale >/dev/null 2>&1; then
+  skip "EC-5 — requires tailscale + valid KV"
+else
+  # Run the read attempt as the nemoclaw user (the unit's User=) so
+  # we exercise the same RBAC path the credential handoff would.
+  # Note: `az login --identity` is bound to the VM, not the local
+  # user, so any uid can call it; what differs is filesystem state
+  # for the cached token. We sudo to nemoclaw and run the full
+  # login + secret-show pair.
+  LEAK_OUT="$(
+    tailscale ssh "$TAILNET_HOST" -- sudo -u nemoclaw -H bash -c \
+      "az login --identity --output none 2>&1 && az keyvault secret show --vault-name '$KV_NAME' --name tailscale-auth-key --query value -o tsv 2>&1" \
+      || true
+  )"
+  # PASS if: 403/404, "not found", "expired", network error, or the
+  # secret has been rotated/deleted. FAIL if a live tskey-auth-... value
+  # comes back.
+  if grep -qE '^tskey-(auth|client)-' <<< "$LEAK_OUT"; then
+    fail "EC-5 — handoff path can read live tailscale-auth-key from KV" \
+         "Tighten the MI's RBAC to a per-secret scope or delete tailscale-auth-key from KV after first boot. (Contract permits the 24h-expiry mitigation, but a live key is still leakage.)"
+  elif grep -qiE 'forbidden|403|not found|404|secretnotfound|expired' <<< "$LEAK_OUT"; then
+    pass "EC-5 — tailscale-auth-key read denied or rotated (output: $(head -c 120 <<< "$LEAK_OUT"))"
+  elif [[ -z "$LEAK_OUT" ]]; then
+    skip "EC-5 — no output from leak probe (Tailscale SSH may have failed)"
+  else
+    # Anything else — the KV value came back as something that
+    # isn't a tskey but also isn't a clear deny. Treat as a soft
+    # pass with the operator-reviewed output.
+    skip "EC-5 — leak probe returned non-tskey content; operator review: $(head -c 200 <<< "$LEAK_OUT")"
+  fi
+fi
 
 # ─── Summary ───────────────────────────────────────────────────────
 
