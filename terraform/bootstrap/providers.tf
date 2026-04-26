@@ -32,6 +32,13 @@ terraform {
 provider "azurerm" {
   subscription_id = var.subscription_id
 
+  # Required when shared_access_key_enabled = false on the state SA
+  # (which it is — see main.tf). Without this, the provider tries to
+  # fetch the storage account key for data-plane operations and fails
+  # with a confusing "shared keys disabled" error. With it, the
+  # provider uses the operator's already-authenticated AAD identity.
+  storage_use_azuread = true
+
   features {
     resource_group {
       prevent_deletion_if_contains_resources = false

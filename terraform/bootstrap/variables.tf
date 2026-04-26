@@ -33,3 +33,15 @@ variable "owner" {
     error_message = "owner must be an email address or a GitHub username (1-39 chars, alphanumeric + hyphens, no leading hyphen)."
   }
 }
+
+variable "operator_ip_cidr" {
+  type        = string
+  description = "Operator's laptop egress IP as a /32 CIDR (e.g. 203.0.113.42/32). Becomes the only public IP allowed to reach the state storage account's blob endpoint. Update and re-apply when the IP changes; if locked out, recover via Azure portal or `az storage account network-rule add`."
+
+  validation {
+    # /32 enforced (constitution Principle V — reject 0.0.0.0/0 and any
+    # broader prefix). 0.0.0.0/32 explicitly rejected for completeness.
+    condition     = can(regex("^([0-9]{1,3}\\.){3}[0-9]{1,3}/32$", var.operator_ip_cidr)) && var.operator_ip_cidr != "0.0.0.0/32"
+    error_message = "operator_ip_cidr must be a single IPv4 /32 (e.g. 203.0.113.42/32). Broader prefixes and 0.0.0.0/32 are rejected."
+  }
+}

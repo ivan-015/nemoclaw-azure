@@ -12,3 +12,15 @@ location = "centralus"
 
 # Owner tag — your email address or GitHub handle.
 owner = "you@example.com"
+
+# Your laptop's current public egress IP as a /32 CIDR. Find it with:
+#   curl -s https://api.ipify.org
+# This becomes the only public IP allowed to reach the state storage
+# account's blob endpoint. Update and re-apply when your IP changes
+# (different network, new ISP, mobile hotspot, etc.). If you get
+# locked out, recover via Azure portal or:
+#   az storage account network-rule add \
+#     --resource-group rg-nemoclaw-tfstate \
+#     --account-name <storage-account-name> \
+#     --ip-address <your-new-ip>
+operator_ip_cidr = "203.0.113.42/32"

@@ -80,13 +80,13 @@ existing ACL — do not replace):
 
   "ssh": [
     // Tailscale SSH from the operator's devices into the VM, no
-    // password / key exchange. Replace `your-handle` with your
-    // Tailscale login.
+    // password / key exchange. Replace `<your-username>` with the
+    // Linux account name on the VM you want to SSH as.
     {
       "action": "accept",
       "src":    ["autogroup:owner"],
       "dst":    ["tag:nemoclaw"],
-      "users":  ["root", "ivan", "nemoclaw"]
+      "users":  ["root", "<your-username>", "nemoclaw"]
     }
   ]
 }

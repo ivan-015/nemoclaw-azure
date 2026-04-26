@@ -13,6 +13,11 @@
 # See README.md (in this directory) for the recovery path if the
 # local state file is lost.
 
+# Read the AAD identity that's running `terraform apply`. Used below
+# to self-grant the data-plane RBAC role the operator needs to read
+# and write Terraform state.
+data "azurerm_client_config" "current" {}
+
 resource "random_string" "suffix" {
   length  = 4
   lower   = true
@@ -41,23 +46,39 @@ resource "azurerm_storage_account" "state" {
   account_kind             = "StorageV2"
 
   # Constitution Security Constraints — storage account hardening.
-  public_network_access_enabled   = false
+  #
+  # public_network_access_enabled = true is a permitted exception
+  # for the bootstrap stage: neither Private Endpoint nor a VNet
+  # service endpoint can cover this account at v1 (no VNet exists
+  # at bootstrap time, and PE would require its own private DNS
+  # zone + bridge infra to reach from a laptop). The constitution's
+  # clause "where Private Endpoint or service endpoint coverage
+  # exists" deliberately excludes this case.
+  #
+  # We compensate with four independent layers:
+  #   1. network_rules.ip_rules — only the operator's /32 reaches
+  #      the data plane (see var.operator_ip_cidr).
+  #   2. shared_access_key_enabled = false — no static keys exist;
+  #      every data-plane op MUST authenticate via AAD.
+  #   3. default_to_oauth_authentication = true — clients default
+  #      to AAD instead of shared key.
+  #   4. min_tls_version = TLS1_2 — no downgrade.
+  # Plus data-plane RBAC scoped to the SA only (see
+  # azurerm_role_assignment.operator_state_blob_writer below).
+  public_network_access_enabled   = true
   shared_access_key_enabled       = false
   allow_nested_items_to_be_public = false
   min_tls_version                 = "TLS1_2"
-
-  # Azure AD auth only; no SAS, no shared key. The operator's
-  # `terraform init` uses `use_azuread_auth=true` to access state.
   default_to_oauth_authentication = true
 
-  # Storage account uses Azure-AD-authenticated network rules. With
-  # public access disabled we must also set the firewall rules.
-  # `bypass = ["AzureServices"]` is required for managed-identity
-  # access from the same region; `default_action = "Deny"` prevents
-  # any other access.
+  # Single-IP allowlist on the data plane. AzureServices bypass is
+  # kept on so that, e.g., Azure Monitor diagnostic-log shipping
+  # (a future v2 addition) keeps working. default_action = "Deny"
+  # blocks every other public IP.
   network_rules {
     default_action = "Deny"
     bypass         = ["AzureServices"]
+    ip_rules       = [replace(var.operator_ip_cidr, "/32", "")]
   }
 
   blob_properties {
@@ -81,4 +102,23 @@ resource "azurerm_storage_container" "state" {
   name                  = local.state_container_name
   storage_account_id    = azurerm_storage_account.state.id
   container_access_type = "private"
+
+  # Container creation is a data-plane operation. With shared keys
+  # disabled, the provider uses AAD (storage_use_azuread = true in
+  # providers.tf). The role assignment below grants the operator's
+  # AAD identity the data-plane permission this needs.
+  depends_on = [azurerm_role_assignment.operator_state_blob_writer]
+}
+
+# Self-grant the operator's AAD identity the data-plane RBAC role.
+# Subscription Owner does NOT include data-plane storage permissions
+# — that's a separate role assignment scoped to the storage account.
+# Without this, container creation and every subsequent state read/
+# write would fail with HTTP 401 from the blob endpoint.
+resource "azurerm_role_assignment" "operator_state_blob_writer" {
+  scope                = azurerm_storage_account.state.id
+  role_definition_name = "Storage Blob Data Contributor"
+  principal_id         = data.azurerm_client_config.current.object_id
+
+  description = "Lets the operator's AAD identity read/write Terraform state via the data plane."
 }

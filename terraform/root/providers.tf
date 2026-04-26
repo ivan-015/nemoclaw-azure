@@ -38,6 +38,12 @@ terraform {
 provider "azurerm" {
   subscription_id = var.subscription_id
 
+  # Same rationale as bootstrap/providers.tf — every storage account
+  # this stage creates (NSG flow logs SA, etc.) will have shared
+  # keys disabled, so the provider must use AAD for data-plane
+  # operations.
+  storage_use_azuread = true
+
   features {
     # Key Vault uses purge protection (constitution Security Constraints).
     # We do NOT auto-purge soft-deleted vaults on destroy — the operator

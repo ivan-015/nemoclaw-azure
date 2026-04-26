@@ -50,7 +50,7 @@ The default region is `centralus`, not the constitution's named
 
 | Aspect | `centralus` | `eastus2` |
 |---|---|---|
-| Price | comparable | comparable (often $0–2/mo cheaper) |
+| Price | comparable | comparable |
 | Latency from US west coast | lower | higher |
 | Latency from US east coast | higher | lower |
 | Co-location with operator's existing personal infra | yes | no |
