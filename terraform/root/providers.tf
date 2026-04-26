@@ -23,6 +23,17 @@ terraform {
       source  = "hashicorp/random"
       version = "~> 3.6"
     }
+
+    # tls is used in modules/vm/main.tf to satisfy the provider's
+    # API constraint that disable_password_authentication=true must
+    # be paired with an admin_ssh_key. We generate an ED25519 key
+    # whose private half stays only in Terraform state and whose
+    # public half can never be reached (no public IP, NSG denies
+    # all inbound). Tailscale SSH is the actual access vector.
+    tls = {
+      source  = "hashicorp/tls"
+      version = "~> 4.0"
+    }
   }
 
   # Backend keys are intentionally left blank here. Supply via:

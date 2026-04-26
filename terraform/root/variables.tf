@@ -87,6 +87,17 @@ variable "foundry_deployments" {
   }
 }
 
+variable "foundry_primary_deployment_key" {
+  type        = string
+  default     = "primary"
+  description = "Map-key in foundry_deployments designating the deployment NemoClaw treats as primary. Its api_version flows into the systemd unit's Environment= directive (cloud-init substitution). Default 'primary' aligns with the personal.tfvars.example template."
+
+  validation {
+    condition     = can(regex("^[A-Za-z0-9-_]+$", var.foundry_primary_deployment_key))
+    error_message = "foundry_primary_deployment_key must be alphanumeric/hyphen/underscore."
+  }
+}
+
 # ─── Tailscale ─────────────────────────────────────────────────────
 
 variable "tailscale_tag" {
@@ -167,4 +178,16 @@ variable "tags" {
   type        = map(string)
   default     = {}
   description = "Extra tags merged with the four mandatory tags. Operator-supplied keys CANNOT override project/owner/cost-center/managed-by — locals.tf enforces this with merge(var.tags, local.mandatory_tags)."
+}
+
+# ─── Operator data-plane IP allowlist ──────────────────────────────
+
+variable "operator_ip_cidr" {
+  type        = string
+  description = "Operator's public IP as a /32 CIDR (e.g. 203.0.113.5/32). Added to the Key Vault network ACL so `az keyvault secret set` from the laptop reaches the data plane despite public_network_access_enabled=false. Constitution Principle V: rejects 0.0.0.0/32 and any non-/32 input."
+
+  validation {
+    condition     = can(regex("^[0-9.]+/32$", var.operator_ip_cidr)) && var.operator_ip_cidr != "0.0.0.0/32"
+    error_message = "operator_ip_cidr must be a single-host /32 CIDR (e.g. 203.0.113.5/32). 0.0.0.0/32 is rejected."
+  }
 }

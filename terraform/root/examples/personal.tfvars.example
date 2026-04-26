@@ -1,0 +1,52 @@
+# Example tfvars for a personal-profile NemoClaw deploy.
+#
+# Copy to `terraform.tfvars` (gitignored) and fill in the placeholders
+# before `terraform apply`. See contracts/tfvars-inputs.md for the full
+# variable contract.
+#
+# DO NOT put the Foundry API key or Tailscale auth key here. Per spec
+# Q2 + constitution Principle II, true secrets live in Key Vault and
+# are populated via `az keyvault secret set` between staged applies
+# (see quickstart.md §3).
+
+# ─── Required ──────────────────────────────────────────────────────
+
+subscription_id = "<your-personal-sub-guid>"
+
+owner = "<you@example.com>"
+
+nemoclaw_version = "<pin-an-actual-tag-here-e.g.-v0.3.1>"
+
+foundry_endpoint = "https://<your-foundry-name>.openai.azure.com"
+
+foundry_deployments = {
+  primary = {
+    model       = "gpt-4o"
+    api_version = "2024-11-20"
+  }
+}
+
+# Operator's public IP (from `curl -s ifconfig.me`) as a /32 CIDR.
+# Added to the Key Vault network ACL so `az keyvault secret set` from
+# this laptop reaches the data plane while public_network_access stays
+# disabled. Refresh if your ISP rotates your IP between sessions.
+operator_ip_cidr = "<your-public-ip>/32"
+
+# ─── Optional (defaults shown — uncomment to override) ─────────────
+
+# location = "centralus"
+# vm_sku   = "Standard_B4als_v2"
+
+# tailscale_tag = "tag:nemoclaw"
+
+# auto_shutdown_enabled    = true
+# auto_shutdown_local_time = "21:00"
+# auto_shutdown_tz         = "America/Los_Angeles"
+
+# cost_center = "personal"
+
+# tags = {
+#   environment = "personal-prod"
+# }
+
+# foundry_primary_deployment_key = "primary"
