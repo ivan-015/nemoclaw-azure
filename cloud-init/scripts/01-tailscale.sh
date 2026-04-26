@@ -50,6 +50,19 @@ echo "[01-tailscale] authenticating to Azure via managed identity"
 # were attached we'd pass --username "$MI_CLIENT_ID".
 az login --identity --output none
 
+# Trap EXIT so the log scrub runs even if `tailscale up` fails part-
+# way and leaves error output in cloud-init logs (Tailscale has been
+# observed to echo auth keys in some error-path messages). Runs on
+# both success and failure paths.
+scrub_logs() {
+  for log in /var/log/cloud-init.log /var/log/cloud-init-output.log; do
+    if [[ -f "$log" ]]; then
+      sed -i -E 's/tskey-(auth|client|device)-[A-Za-z0-9-]+/tskey-\1-REDACTED/g' "$log" 2>/dev/null || true
+    fi
+  done
+}
+trap scrub_logs EXIT
+
 echo "[01-tailscale] fetching tailscale auth key from Key Vault"
 # `set +x` not strictly needed — we're not in -x — but we also avoid
 # echoing the key. Capture into a variable scoped to this script's
@@ -70,13 +83,18 @@ if [[ -z "$TAILSCALE_AUTH_KEY" || "$TAILSCALE_AUTH_KEY" == PLACEHOLDER* ]]; then
 fi
 
 echo "[01-tailscale] registering node on tailnet"
+# Pass the key via TS_AUTHKEY env var rather than --authkey= on the
+# command line. The argv path lands the key in /proc/<pid>/cmdline
+# (visible to any uid via `ps`); environ is readable only by the
+# same uid + root, materially smaller surface (Phase 3 review H1).
+# Tailscale ≥ 1.20 supports TS_AUTHKEY natively.
+#
 # --ssh=true enables Tailscale SSH (operator gets a shell without
-# any inbound port + without us issuing SSH keys — FR-005 satisfied).
+# any inbound NSG rule and without us issuing SSH keys — FR-005).
 # --advertise-tags scopes the node under the operator's ACL.
 # --hostname is deterministic so `tailscale ping <hostname>` works
 # from any tailnet device.
-tailscale up \
-  --authkey="$TAILSCALE_AUTH_KEY" \
+TS_AUTHKEY="$TAILSCALE_AUTH_KEY" tailscale up \
   --ssh=true \
   --advertise-tags="$TAILSCALE_TAG" \
   --hostname="$TAILSCALE_HOSTNAME" \
@@ -86,18 +104,8 @@ tailscale up \
 # not zeroize the underlying memory page (the kernel may keep it in
 # the heap until the page is reused), but the key is also bounded
 # by Tailscale's 24h ephemeral expiry (R5) so the residual exposure
-# window is short. The cloud-init log lines that reference this
-# variable do not include the value (we never echoed it).
+# window is short.
 unset TAILSCALE_AUTH_KEY
-
-# Belt-and-suspenders: scrub any line in cloud-init's persisted logs
-# that might have captured the key value via a stray `set -x` or a
-# script-error trace. This is paranoia — FR-012 requires we scrub.
-for log in /var/log/cloud-init.log /var/log/cloud-init-output.log; do
-  if [[ -f "$log" ]]; then
-    sed -i -E 's/tskey-auth-[A-Za-z0-9-]+/tskey-auth-REDACTED/g' "$log"
-  fi
-done
 
 echo "[01-tailscale] node registered. tailscale status:"
 tailscale status || true

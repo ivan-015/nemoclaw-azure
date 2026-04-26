@@ -15,6 +15,23 @@
 # between-applies seeding).
 data "azurerm_client_config" "current" {}
 
+# Cross-variable guard: foundry_primary_deployment_key MUST exist as
+# a key in foundry_deployments. A regular `validation` block on
+# either variable can't reference the other; a precondition on a
+# `terraform_data` resource can. This fails at plan time with a
+# human-readable error rather than crashing later when main.tf
+# dereferences var.foundry_deployments[var.foundry_primary_deployment_key].
+resource "terraform_data" "input_validation" {
+  input = "input-validation-marker"
+
+  lifecycle {
+    precondition {
+      condition     = contains(keys(var.foundry_deployments), var.foundry_primary_deployment_key)
+      error_message = "foundry_primary_deployment_key '${var.foundry_primary_deployment_key}' is not a key in foundry_deployments. Defined keys: ${join(", ", keys(var.foundry_deployments))}."
+    }
+  }
+}
+
 resource "azurerm_resource_group" "main" {
   name     = local.resource_group_name
   location = var.location

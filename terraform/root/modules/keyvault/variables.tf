@@ -60,8 +60,15 @@ variable "operator_ip_cidr" {
   description = "Operator's public IP as a /32 CIDR (e.g. 203.0.113.5/32). Added to network_acls.ip_rules so `az keyvault secret set` from the operator's laptop reaches the data plane despite public_network_access_enabled=false."
 
   validation {
-    condition     = can(regex("^[0-9.]+/32$", var.operator_ip_cidr)) && var.operator_ip_cidr != "0.0.0.0/32"
-    error_message = "operator_ip_cidr must be a single-host /32 CIDR (e.g. 203.0.113.5/32). 0.0.0.0/32 is rejected; constitution Principle V forbids effectively-public allowlists."
+    # `cidrhost()` errors on malformed CIDRs; `can()` traps that into
+    # a plan-time error rather than an opaque Azure API rejection at
+    # apply time. Same pattern as terraform/root/variables.tf.
+    condition = (
+      can(cidrhost(var.operator_ip_cidr, 0))
+      && endswith(var.operator_ip_cidr, "/32")
+      && var.operator_ip_cidr != "0.0.0.0/32"
+    )
+    error_message = "operator_ip_cidr must be a syntactically valid /32 single-host CIDR (e.g. 203.0.113.5/32). 0.0.0.0/32 is rejected; constitution Principle V forbids effectively-public allowlists."
   }
 }
 

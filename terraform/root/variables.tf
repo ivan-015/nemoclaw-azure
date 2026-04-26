@@ -184,10 +184,19 @@ variable "tags" {
 
 variable "operator_ip_cidr" {
   type        = string
-  description = "Operator's public IP as a /32 CIDR (e.g. 203.0.113.5/32). Added to the Key Vault network ACL so `az keyvault secret set` from the laptop reaches the data plane despite public_network_access_enabled=false. Constitution Principle V: rejects 0.0.0.0/32 and any non-/32 input."
+  description = "Operator's public IP as a /32 CIDR (e.g. 203.0.113.5/32). Added to the Key Vault network ACL so `az keyvault secret set` from the laptop reaches the data plane despite public_network_access_enabled=false. Constitution Principle V: rejects 0.0.0.0/32 and any malformed CIDR."
 
   validation {
-    condition     = can(regex("^[0-9.]+/32$", var.operator_ip_cidr)) && var.operator_ip_cidr != "0.0.0.0/32"
-    error_message = "operator_ip_cidr must be a single-host /32 CIDR (e.g. 203.0.113.5/32). 0.0.0.0/32 is rejected."
+    # `cidrhost()` returns the first host in the prefix; it errors if
+    # the input is not a syntactically valid CIDR. `can()` traps the
+    # error and turns it into a boolean. This catches malformed
+    # octets (999.999.999.999) and wrong-arity addresses (1.2.3.4.5)
+    # that a regex would silently let through.
+    condition = (
+      can(cidrhost(var.operator_ip_cidr, 0))
+      && endswith(var.operator_ip_cidr, "/32")
+      && var.operator_ip_cidr != "0.0.0.0/32"
+    )
+    error_message = "operator_ip_cidr must be a syntactically valid /32 single-host CIDR (e.g. 203.0.113.5/32). 0.0.0.0/32 is rejected."
   }
 }

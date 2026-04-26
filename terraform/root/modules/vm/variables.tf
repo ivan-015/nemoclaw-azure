@@ -46,11 +46,22 @@ variable "image" {
     publisher = "Canonical"
     offer     = "ubuntu-24_04-lts"
     sku       = "server"
-    # Pinned image version — bumping is a deliberate change with a
-    # diff (Principle V). `latest` is intentionally not used.
-    version = "latest"
+    # Concrete image version — Principle V (reproducibility) requires
+    # a real string here, not "latest". Operator can refresh the pin
+    # via:
+    #   az vm image list \
+    #     --publisher Canonical --offer ubuntu-24_04-lts --sku server \
+    #     --all --query "reverse(sort_by([], &version))[0].version" -o tsv
+    # Bump on a deliberate PR with the diff visible. The OS is the
+    # supply-chain root for everything cloud-init installs on top.
+    version = "24.04.202504150"
   }
-  description = "Marketplace image. Default Ubuntu 24.04 LTS server."
+  description = "Marketplace image. Default Ubuntu 24.04 LTS server, pinned to a concrete version per Principle V. Override via tfvars to test newer images on a throwaway RG before bumping the default."
+
+  validation {
+    condition     = var.image.version != "latest" && var.image.version != ""
+    error_message = "image.version must be a concrete Marketplace version string (e.g. 24.04.202504150). 'latest' is rejected to preserve reproducibility (Principle V)."
+  }
 }
 
 variable "os_disk_size_gb" {
