@@ -48,13 +48,14 @@ variable "image" {
     sku       = "server"
     # Concrete image version — Principle V (reproducibility) requires
     # a real string here, not "latest". Operator can refresh the pin
-    # via:
-    #   az vm image list \
-    #     --publisher Canonical --offer ubuntu-24_04-lts --sku server \
-    #     --all --query "reverse(sort_by([], &version))[0].version" -o tsv
+    # via (resolves the actual stable-channel current version, NOT
+    # the daily-channel build that `az vm image list --all` surfaces):
+    #   az vm image show \
+    #     --urn "Canonical:ubuntu-24_04-lts:server:latest" \
+    #     --location <region> --query name -o tsv
     # Bump on a deliberate PR with the diff visible. The OS is the
     # supply-chain root for everything cloud-init installs on top.
-    version = "24.04.202504150"
+    version = "24.04.202604160"
   }
   description = "Marketplace image. Default Ubuntu 24.04 LTS server, pinned to a concrete version per Principle V. Override via tfvars to test newer images on a throwaway RG before bumping the default."
 
