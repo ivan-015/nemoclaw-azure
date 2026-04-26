@@ -104,11 +104,11 @@ Notes:
 
 ## 4. On `terraform destroy` — manual node revocation (v1)
 
-Tailscale auth keys auto-revoke their *issuance* on destroy (the key
-is single-use), but the *node* itself remains registered in the tailnet
-until removed. v1 does not automate node revocation (research R5
-revised — would need a Tailscale API token, which itself becomes a
-long-lived credential).
+Tailscale auth keys are reusable=false (single-use) and auto-revoke
+their *issuance* once consumed, but the *node itself* remains
+registered in the tailnet until you remove it. v1 does not automate
+node revocation (research R5 revised — would need a Tailscale API
+token, which itself becomes a long-lived credential).
 
 After `terraform destroy`:
 
@@ -120,10 +120,23 @@ After `terraform destroy`:
 This step is idempotent — if the node already auto-removed via the
 ephemeral expiry, "Remove" is a no-op.
 
+**Companion concern: the persisted auth-key value in Key Vault.**
+The auth-key value the operator stored in KV at first deploy
+(via `az keyvault secret set` per quickstart §3) does NOT get
+purged by `terraform destroy` — KV soft-delete + purge protection
+keep the secret alive for 7 days. v1 does not run a `null_resource`
+to delete the secret post-deploy (per the user's spec trim #4,
+flaky `local-exec` dependency on the operator's `az login` was not
+worth the marginal mitigation). Instead, v1 relies on Tailscale's
+own 24h ephemeral-key expiry — see §5 below — which renders that
+persisted KV value useless as a credential after 24 hours regardless
+of soft-delete state.
+
 **v2 candidate**: a `null_resource` on destroy that calls the
-Tailscale REST API. Requires storing a Tailscale API key in Key Vault
-and granting cloud-init read access; deferred until a real ergonomic
-need surfaces.
+Tailscale REST API to revoke the node + delete the KV secret.
+Requires storing a Tailscale API key in Key Vault and granting
+the operator's apply-time identity read access; deferred until a
+real ergonomic need surfaces.
 
 ---
 

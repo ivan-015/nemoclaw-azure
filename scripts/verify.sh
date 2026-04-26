@@ -4,8 +4,8 @@
 #
 # Source-of-truth: specs/001-hardened-nemoclaw-deploy/contracts/verification-checks.md
 #
-# At Phase 3 (US1) + Phase 4 (US2) + Phase 5 (US3) this script
-# implements:
+# At Phase 3 (US1) + Phase 4 (US2) + Phase 5 (US3) + Phase 7 (US5)
+# this script implements:
 #   - Pre-flight: 0a, 0b, 0c
 #   - SC-001: 3a (tailscale ping), 3b (Tailscale SSH lands)
 #   - SC-002: apply timing (advisory — caller wraps `terraform apply`
@@ -22,12 +22,15 @@
 #             VERIFY_TEST_START_LATENCY=1 — destructive: deallocates
 #             the VM)
 #   - SC-008: KV audit landing (every SecretGet recorded in LA)
+#   - SC-009: destroy + redeploy is clean (opt-in via
+#             VERIFY_TEST_DESTROY_REDEPLOY=1 — destructive: tears
+#             the deployment down and re-creates it with a fresh
+#             KV-name suffix)
 #   - EC-2:   Foundry key rotation propagates after restart
 #             (manual / advisory)
 #   - EC-4:   tmpfs handoff file unlinked promptly
 #   - EC-5:   handoff cannot leak the Tailscale auth key
-#
-# US5 (T050) appends SC-009.
+#   - EC-debug: no-network debug paths still work (manual)
 #
 # Exits non-zero if any non-advisory check fails.
 
@@ -550,6 +553,92 @@ else
     # isn't a tskey but also isn't a clear deny. Treat as a soft
     # pass with the operator-reviewed output.
     skip "EC-5 — leak probe returned non-tskey content; operator review: $(head -c 200 <<< "$LEAK_OUT")"
+  fi
+fi
+
+# ─── SC-009: destroy + redeploy is clean ───────────────────────────
+#
+# The full check (per contracts/verification-checks.md):
+#   9a. `terraform destroy -auto-approve` exits 0
+#   9b. `az resource list -g <rg>` is empty (or the RG itself is gone)
+#   9c. `terraform taint random_string.deploy_suffix && terraform apply`
+#       exits 0 with a different KV name
+#
+# Opt-in via VERIFY_TEST_DESTROY_REDEPLOY=1 — this is destructive
+# (it tears the operator's deploy down) and slow (~25–30 minutes
+# wall-clock for the full destroy + apply cycle). Skipped by default
+# so accidentally running verify.sh during normal work doesn't take
+# the operator's deploy out from under them.
+#
+# When skipped, prints the recommended manual sequence so the
+# operator can run it once during v1 acceptance.
+
+section "SC-009 — destroy + redeploy is clean (opt-in: VERIFY_TEST_DESTROY_REDEPLOY=1)"
+
+if [[ "${VERIFY_TEST_DESTROY_REDEPLOY:-0}" != "1" ]]; then
+  cat <<MANUAL
+[SKIP] SC-009 — destructive; set VERIFY_TEST_DESTROY_REDEPLOY=1 to run automatically. Manual sequence:
+
+  # Capture pre-destroy state for the redeploy comparison.
+  KV_BEFORE=\$(terraform output -raw key_vault_name)
+
+  # 9a: destroy
+  terraform destroy -auto-approve
+
+  # 9b: confirm the RG is empty (or gone)
+  az resource list -g "$RG_NAME" -o tsv
+
+  # 9c: redeploy with a fresh suffix — bypasses the KV soft-delete hold
+  terraform taint random_string.deploy_suffix
+  terraform apply -auto-approve
+
+  # Confirm the new KV name differs from \$KV_BEFORE
+  KV_AFTER=\$(terraform output -raw key_vault_name)
+  test "\$KV_BEFORE" != "\$KV_AFTER" && echo "9c PASS — fresh suffix"
+
+Don't forget to manually remove the old tag:nemoclaw node from the Tailscale admin console between steps (docs/TAILSCALE.md §4).
+MANUAL
+  SKIP_COUNT=$((SKIP_COUNT + 1))
+elif [[ -z "$RG_NAME" || -z "$KV_NAME" ]]; then
+  fail "SC-009 — terraform outputs unavailable; run after a successful apply"
+else
+  KV_BEFORE="$KV_NAME"
+  echo "SC-009 — pre-destroy KV name: $KV_BEFORE"
+
+  # 9a: destroy
+  echo "SC-009 — running terraform destroy -auto-approve (this takes several minutes)..."
+  if terraform destroy -auto-approve >/tmp/sc009-destroy.log 2>&1; then
+    pass "9a — terraform destroy exited 0 (log: /tmp/sc009-destroy.log)"
+  else
+    fail "9a — terraform destroy failed" \
+         "See /tmp/sc009-destroy.log. Common cause: KV purge protection holds the vault alive — that's expected and not a destroy failure."
+  fi
+
+  # 9b: RG should be empty (or gone). The RG itself is destroyed by
+  # the destroy; `az resource list` either returns [] or the command
+  # itself errors with "ResourceGroupNotFound". Both pass.
+  RG_RESOURCES="$(az resource list -g "$RG_NAME" -o tsv 2>&1 || true)"
+  if [[ -z "$RG_RESOURCES" ]] || grep -qi "ResourceGroupNotFound" <<< "$RG_RESOURCES"; then
+    pass "9b — RG is empty or gone"
+  else
+    fail "9b — RG still contains resources" \
+         "Output: $RG_RESOURCES — these may need manual cleanup (e.g. Tailscale node not removed yet)."
+  fi
+
+  # 9c: redeploy with a fresh suffix
+  echo "SC-009 — tainting random_string.deploy_suffix and re-applying..."
+  terraform taint random_string.deploy_suffix >/dev/null 2>&1 || true
+  if terraform apply -auto-approve >/tmp/sc009-apply.log 2>&1; then
+    KV_AFTER="$(terraform output -raw key_vault_name 2>/dev/null || true)"
+    if [[ -n "$KV_AFTER" && "$KV_AFTER" != "$KV_BEFORE" ]]; then
+      pass "9c — re-apply succeeded with fresh KV name ($KV_BEFORE → $KV_AFTER)"
+    else
+      fail "9c — re-apply succeeded but KV name unchanged" \
+           "Suffix taint should have produced a different name."
+    fi
+  else
+    fail "9c — terraform apply (post-taint) failed" \
+         "See /tmp/sc009-apply.log."
   fi
 fi
 

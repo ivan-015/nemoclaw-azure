@@ -276,20 +276,58 @@ reproducible. Plan for ~10 minutes of downtime.
 
 ### Tearing down
 
+The teardown is three steps: Terraform, Tailscale, then (if you'll
+redeploy) suffix taint. Each step is idempotent.
+
 ```bash
+# 1. Tear down all Azure resources in this RG.
 terraform destroy
-# Then in the Tailscale admin console, manually remove the
-# tag:nemoclaw node (research R5).
 ```
 
-If you plan to re-deploy, run:
+The Key Vault enters its 7-day soft-delete retention period
+(constitution Principle II requires `purge_protection_enabled`, which
+forbids immediate hard-delete). The auto-shutdown schedule, VM, NIC,
+NSG, network watcher flow logs, KV diagnostic settings, and managed
+identity all hard-delete.
 
 ```bash
-terraform taint random_string.deploy_suffix
+# 2. Manually remove the Tailscale node from the tailnet.
+#    (No null_resource purge in v1 — see docs/TAILSCALE.md §4.)
 ```
 
-…before the next `apply` so the new Key Vault gets a fresh name and
-isn't blocked by the soft-deleted predecessor.
+Visit <https://login.tailscale.com/admin/machines>, find the node
+with hostname `nemoclaw-<suffix>`, click "Remove". Idempotent — if
+the ephemeral 24h expiry already auto-removed the node, the button
+is a no-op.
+
+The Tailscale auth key persists in the (soft-deleted) Key Vault
+until the soft-delete retention expires OR the next apply
+overwrites it. Tailscale's own 24h ephemeral-key expiry (set when
+you generated the key — see `docs/TAILSCALE.md` §1) makes that
+persisted KV value unusable as a credential after 24 hours; this is
+the v1 mitigation for the residual KV-side copy. **No
+`null_resource` purge runs at v1** — that's a v2 candidate
+documented in `docs/TAILSCALE.md` §5.
+
+```bash
+# 3. (Optional, only if you'll redeploy.) Force a fresh suffix so
+#    the new KV name doesn't collide with the soft-deleted one.
+terraform taint random_string.deploy_suffix
+terraform apply
+```
+
+The taint regenerates `random_string.deploy_suffix.result`, which
+flows through `local.suffix` into every globally-unique resource
+name (`kv_name`, `mi_name`, `resource_group_name`, the flow-logs
+storage account, the VM name). The new KV gets a different name
+and bypasses the 7-day soft-delete hold on the predecessor.
+
+Without the taint, a redeploy within the soft-delete window will
+fail at the KV creation step with "The vault name '<old-name>' is
+currently in a soft-deleted state and cannot be reused for 6 days."
+The taint is the documented escape hatch (research R7 / spec
+FR-026); waiting out the soft-delete window also works but is
+slower.
 
 ---
 
