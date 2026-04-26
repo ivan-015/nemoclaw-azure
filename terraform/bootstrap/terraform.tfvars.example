@@ -1,0 +1,14 @@
+# Bootstrap-stage variables — copy to terraform.tfvars and fill in.
+# DO NOT commit terraform.tfvars (gitignored at repo root).
+
+# Your personal Azure subscription GUID. Must NOT be a production sub.
+subscription_id = "00000000-0000-0000-0000-000000000000"
+
+# Azure region for the state backend. Use the same region as the
+# main deploy for in-region latency on `terraform plan`/`apply`.
+# Allowed values: eastus, eastus2, centralus, westus2, westus3,
+# northeurope, westeurope.
+location = "centralus"
+
+# Owner tag — your email address or GitHub handle.
+owner = "you@example.com"
