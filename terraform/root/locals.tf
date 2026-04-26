@@ -49,4 +49,23 @@ locals {
 
   # Shared resource-group name. RG names: ≤90 chars; we keep it short.
   resource_group_name = "rg-nemoclaw-${local.suffix}"
+
+  # Azure DevTest Labs `azurerm_dev_test_global_vm_shutdown_schedule`
+  # accepts Windows timezone IDs (e.g. "Pacific Standard Time"), not
+  # IANA names. Operators specify IANA in tfvars (the modern, correct
+  # format); this map translates to what Azure expects. Keys must
+  # match the allowlist in variables.tf §auto_shutdown_tz exactly.
+  timezone_iana_to_windows = {
+    "America/Los_Angeles" = "Pacific Standard Time"
+    "America/Denver"      = "Mountain Standard Time"
+    "America/Chicago"     = "Central Standard Time"
+    "America/New_York"    = "Eastern Standard Time"
+    "UTC"                 = "UTC"
+    "Europe/London"       = "GMT Standard Time"
+    "Europe/Berlin"       = "W. Europe Standard Time"
+    "Europe/Madrid"       = "Romance Standard Time"
+    "Asia/Tokyo"          = "Tokyo Standard Time"
+    "Asia/Singapore"      = "Singapore Standard Time"
+    "Australia/Sydney"    = "AUS Eastern Standard Time"
+  }
 }

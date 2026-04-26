@@ -233,15 +233,22 @@ won't see the secret anywhere in your shell.
 
 ### Starting after auto-shutdown
 
-The VM auto-shuts-down at 21:00 America/Los_Angeles. To use it again:
+The VM auto-shuts-down at 21:00 America/Los_Angeles by default
+(configurable via `auto_shutdown_local_time` / `auto_shutdown_tz`;
+disable for active iteration days with the `dev.tfvars.example`
+profile). To wake it again, run the printable `az vm start ...`
+emitted as a Terraform output:
 
 ```bash
-RG=$(terraform output -raw resource_group_name)
-VM_NAME=$(terraform output -raw vm_name)
-az vm start -g "$RG" -n "$VM_NAME"
+$(terraform output -raw start_command)
 # Wait ~3 minutes, then:
 tailscale ping $(terraform output -raw vm_tailnet_hostname)
 ```
+
+The credential handoff fires on every service start, so post-
+deallocation NemoClaw re-fetches the Foundry API key from Key Vault
+without operator intervention. If Tailscale doesn't come back
+within ~3 min, jump to §8 troubleshooting.
 
 ### Rotating the Foundry key
 

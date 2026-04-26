@@ -1,0 +1,53 @@
+# Example tfvars for an active-iteration NemoClaw deploy.
+#
+# Same as personal.tfvars.example except auto-shutdown is OFF — useful
+# on days you're iterating on the deployment itself and don't want the
+# VM disappearing at 21:00 mid-debug.
+#
+# Cost trade-off: ~$80/mo at PAYG vs ~$40/mo with auto-shutdown ON.
+# Acceptable for a single iteration day; remember to switch back to
+# personal.tfvars.example (or set auto_shutdown_enabled = true) when
+# you're done. Constitution Cost & Operational Constraints accepts
+# the brief overage as long as it's intentional.
+#
+# Copy to `terraform.tfvars` (gitignored) and fill in the placeholders
+# before `terraform apply`. See contracts/tfvars-inputs.md for the full
+# variable contract.
+
+# ─── Required ──────────────────────────────────────────────────────
+
+subscription_id = "<your-personal-sub-guid>"
+
+owner = "<you@example.com>"
+
+nemoclaw_version = "<pin-an-actual-tag-here-e.g.-v0.3.1>"
+
+foundry_endpoint = "https://<your-foundry-name>.openai.azure.com"
+
+foundry_deployments = {
+  primary = {
+    model       = "gpt-4o"
+    api_version = "2024-11-20"
+  }
+}
+
+operator_ip_cidr = "<your-public-ip>/32"
+
+# ─── Auto-shutdown OFF (the only meaningful diff vs personal) ──────
+
+auto_shutdown_enabled = false
+
+# ─── Optional (defaults shown — uncomment to override) ─────────────
+
+# location = "centralus"
+# vm_sku   = "Standard_B4als_v2"
+
+# tailscale_tag = "tag:nemoclaw"
+
+# cost_center = "personal"
+
+# tags = {
+#   environment = "personal-dev"
+# }
+
+# foundry_primary_deployment_key = "primary"

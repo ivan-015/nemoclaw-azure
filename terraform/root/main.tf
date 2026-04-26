@@ -138,3 +138,40 @@ module "vm" {
     module.network,
   ]
 }
+
+# ─── Auto-shutdown (US3 / T036) ───────────────────────────────────
+#
+# Daily VM deallocation per spec SC-005/SC-006. Lives at the root
+# rather than inside the vm module so the vm module stays reusable
+# for non-personal profiles (where shutdown might be undesired or
+# scheduled differently).
+#
+# Per spec Q1 (no alerting in v1), notification_settings.enabled is
+# false — the deallocation simply happens, the operator notices on
+# the next attempt to use the VM and runs `az vm start` (the
+# start_command output prints the exact invocation).
+#
+# count = 0 when var.auto_shutdown_enabled is false (the dev profile
+# in dev.tfvars.example) so iteration days don't fight the schedule.
+resource "azurerm_dev_test_global_vm_shutdown_schedule" "vm" {
+  count = var.auto_shutdown_enabled ? 1 : 0
+
+  virtual_machine_id = module.vm.id
+  location           = var.location
+  enabled            = true
+
+  # Azure expects HHMM (4 digits, no separator). The variable's
+  # validation already enforced HH:MM with a colon, so this is a
+  # safe transform.
+  daily_recurrence_time = replace(var.auto_shutdown_local_time, ":", "")
+
+  # Map IANA → Windows timezone IDs (locals.tf). The variable
+  # validation guarantees the key exists in the map.
+  timezone = local.timezone_iana_to_windows[var.auto_shutdown_tz]
+
+  notification_settings {
+    enabled = false
+  }
+
+  tags = local.tags
+}

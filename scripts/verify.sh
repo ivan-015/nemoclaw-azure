@@ -4,7 +4,8 @@
 #
 # Source-of-truth: specs/001-hardened-nemoclaw-deploy/contracts/verification-checks.md
 #
-# At Phase 3 (US1) + Phase 4 (US2) this script implements:
+# At Phase 3 (US1) + Phase 4 (US2) + Phase 5 (US3) this script
+# implements:
 #   - Pre-flight: 0a, 0b, 0c
 #   - SC-001: 3a (tailscale ping), 3b (Tailscale SSH lands)
 #   - SC-002: apply timing (advisory — caller wraps `terraform apply`
@@ -14,13 +15,19 @@
 #             2c (port scan reminder, manual)
 #   - SC-004: 4a–4e Principle II tooth-check (sandboxed agent never
 #             sees the KV value)
+#   - SC-005: cost reminder (advisory — prints Cost Management URL)
+#   - SC-006: post-shutdown deallocation (active only after the
+#             scheduled shutdown time)
+#   - SC-007: start-to-tailscale-reachable timing (opt-in via
+#             VERIFY_TEST_START_LATENCY=1 — destructive: deallocates
+#             the VM)
 #   - SC-008: KV audit landing (every SecretGet recorded in LA)
 #   - EC-2:   Foundry key rotation propagates after restart
 #             (manual / advisory)
 #   - EC-4:   tmpfs handoff file unlinked promptly
 #   - EC-5:   handoff cannot leak the Tailscale auth key
 #
-# US3 (T041) appends SC-005/006/007. US5 (T050) appends SC-009.
+# US5 (T050) appends SC-009.
 #
 # Exits non-zero if any non-advisory check fails.
 
@@ -403,6 +410,105 @@ fi
 section "EC-2 — Foundry key rotation (manual)"
 
 skip "EC-2 — manual: \`az keyvault secret set --vault-name $KV_NAME --name foundry-api-key --value <new-key>\` then \`tailscale ssh $TAILNET_HOST -- sudo systemctl restart nemoclaw\`; confirm a fresh inference call succeeds with the new key. No code change needed; see contracts/credential-handoff.md §'Failure-mode coverage matrix'."
+
+# ─── SC-005: cost reminder (advisory) ──────────────────────────────
+#
+# Actual cost lookup is interactive (Azure portal → Cost Management).
+# This check just prints the URL so the operator can paste it into
+# their browser. Target: ≤ $40/mo with auto-shutdown ON, ≤ $80/mo
+# PAYG without it.
+
+section "SC-005 — cost forecast (advisory)"
+
+if [[ -z "$RG_NAME" || -z "${SUB_ID:-}" ]]; then
+  skip "SC-005 — need both subscription_id and resource_group_name"
+else
+  COST_URL="https://portal.azure.com/#view/Microsoft_Azure_CostManagement/Menu/~/costanalysis/scope/%2Fsubscriptions%2F${SUB_ID}%2FresourceGroups%2F${RG_NAME}"
+  skip "SC-005 — open Cost Management for this RG: $COST_URL (target: \$40/mo with auto-shutdown ON, \$80/mo PAYG)"
+fi
+
+# ─── SC-006: auto-shutdown deallocates the VM ──────────────────────
+#
+# Print the current PowerState plus the configured shutdown time.
+# If the operator runs verify.sh after 21:10 PT (the documented
+# shutdown window + 10 min slack per spec), they should see
+# "PowerState/deallocated". Earlier in the day, they should see
+# "PowerState/running". Either is informational — fail only if the
+# state can't be read at all.
+
+section "SC-006 — auto-shutdown (advisory; manual after 21:10 PT)"
+
+if [[ -z "$RG_NAME" || -z "$VM_NAME" ]]; then
+  skip "SC-006 — need terraform outputs"
+else
+  POWER_STATE="$(
+    az vm get-instance-view -g "$RG_NAME" -n "$VM_NAME" \
+      --query "instanceView.statuses[?starts_with(code, 'PowerState/')].code" \
+      -o tsv 2>/dev/null | head -1 || true
+  )"
+  SHUTDOWN_TIME="$(terraform output -raw 2>/dev/null \
+    | grep -E '^(auto_shutdown|shutdown)' || true)"
+  if [[ -z "$POWER_STATE" ]]; then
+    fail "SC-006 — could not read PowerState for $VM_NAME"
+  else
+    skip "SC-006 — current PowerState: $POWER_STATE (after 21:10 PT expect PowerState/deallocated)"
+  fi
+fi
+
+# ─── SC-007: start-to-tailscale-reachable timing ───────────────────
+#
+# Opt-in via VERIFY_TEST_START_LATENCY=1. This check is destructive:
+# it deallocates the VM, then times `az vm start` + the wait for
+# Tailscale ping to come back. Target: ≤ 5m wall-clock (spec SC-007).
+#
+# Skipped by default so accidentally running verify.sh during normal
+# work doesn't take the operator's deploy down for several minutes.
+
+section "SC-007 — start latency (opt-in: VERIFY_TEST_START_LATENCY=1)"
+
+if [[ "${VERIFY_TEST_START_LATENCY:-0}" != "1" ]]; then
+  skip "SC-007 — destructive timing check; set VERIFY_TEST_START_LATENCY=1 to run (will deallocate + restart the VM)"
+elif [[ -z "$RG_NAME" || -z "$VM_NAME" ]] || ! command -v tailscale >/dev/null 2>&1; then
+  skip "SC-007 — need terraform outputs and tailscale CLI"
+else
+  echo "SC-007 — deallocating $VM_NAME for cold-start timing..."
+  if ! az vm deallocate -g "$RG_NAME" -n "$VM_NAME" --no-wait >/dev/null 2>&1; then
+    fail "SC-007 — could not issue deallocate"
+  else
+    # Poll until deallocated, max 5 min
+    DEALLOC_START="$(date +%s)"
+    while (( $(date +%s) - DEALLOC_START < 300 )); do
+      STATE="$(
+        az vm get-instance-view -g "$RG_NAME" -n "$VM_NAME" \
+          --query "instanceView.statuses[?starts_with(code, 'PowerState/')].code" \
+          -o tsv 2>/dev/null | head -1 || true
+      )"
+      [[ "$STATE" == "PowerState/deallocated" ]] && break
+      sleep 5
+    done
+
+    if [[ "$STATE" != "PowerState/deallocated" ]]; then
+      fail "SC-007 — VM did not reach deallocated within 5m (state: $STATE)"
+    else
+      START_T0="$(date +%s)"
+      az vm start -g "$RG_NAME" -n "$VM_NAME" >/dev/null 2>&1
+      # Poll Tailscale ping
+      while (( $(date +%s) - START_T0 < 300 )); do
+        if tailscale ping --c 1 --timeout 5s "$TAILNET_HOST" >/dev/null 2>&1; then
+          break
+        fi
+        sleep 5
+      done
+      ELAPSED=$(( $(date +%s) - START_T0 ))
+
+      if (( ELAPSED >= 300 )); then
+        fail "SC-007 — start-to-tailscale-reachable exceeded 5m (${ELAPSED}s)"
+      else
+        pass "SC-007 — start-to-tailscale-reachable: ${ELAPSED}s (≤ 300s target)"
+      fi
+    fi
+  fi
+fi
 
 # ─── EC-5: handoff cannot leak the Tailscale auth key ──────────────
 #
