@@ -10,7 +10,7 @@ locals {
   mandatory_tags = {
     project     = "nemoclaw-azure"
     owner       = var.owner
-    cost-center = "personal"
+    cost-center = var.cost_center
     managed-by  = "terraform"
   }
 

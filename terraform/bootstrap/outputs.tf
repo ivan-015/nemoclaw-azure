@@ -5,8 +5,8 @@
 # invocation. See README.md in this directory for the exact sequence.
 
 output "resource_group_name" {
-  value       = azurerm_resource_group.state.name
-  description = "Resource group holding the Terraform state backend."
+  value       = azurerm_resource_group.shared.name
+  description = "Single shared resource group — holds both the Terraform state backend (this stage) and the workload resources (root stage)."
 }
 
 output "storage_account_name" {
@@ -25,7 +25,7 @@ output "container_name" {
 output "backend_config_block" {
   value       = <<-EOT
     terraform init \
-      -backend-config="resource_group_name=${azurerm_resource_group.state.name}" \
+      -backend-config="resource_group_name=${azurerm_resource_group.shared.name}" \
       -backend-config="storage_account_name=${azurerm_storage_account.state.name}" \
       -backend-config="container_name=${azurerm_storage_container.state.name}" \
       -backend-config="key=root.tfstate" \

@@ -13,6 +13,16 @@ location = "centralus"
 # Owner tag — your email address or GitHub handle.
 owner = "you@example.com"
 
+# cost-center tag value. Default 'personal' for personal-sub deploys;
+# set to your team/cost-center name when deploying into a work or
+# shared subscription.
+# cost_center = "personal"
+
+# Single shared resource group name. Both stages (bootstrap +
+# root) deploy here. Default is fine for most deploys; only override
+# if a naming policy mandates a prefix.
+# resource_group_name = "rg-nemoclaw"
+
 # Your laptop's current public egress IP as a /32 CIDR. Find it with:
 #   curl -s https://api.ipify.org
 # This becomes the only public IP allowed to reach the state storage
@@ -20,7 +30,7 @@ owner = "you@example.com"
 # (different network, new ISP, mobile hotspot, etc.). If you get
 # locked out, recover via Azure portal or:
 #   az storage account network-rule add \
-#     --resource-group rg-nemoclaw-tfstate \
+#     --resource-group rg-nemoclaw \
 #     --account-name <storage-account-name> \
 #     --ip-address <your-new-ip>
 operator_ip_cidr = "203.0.113.42/32"

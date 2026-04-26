@@ -182,6 +182,12 @@ variable "tags" {
 
 # ─── Operator data-plane IP allowlist ──────────────────────────────
 
+variable "resource_group_name" {
+  type        = string
+  default     = "rg-nemoclaw"
+  description = "Name of the single shared resource group (created by terraform/bootstrap/). Root reads it via data source — bootstrap MUST have applied successfully first. Override only if you set a non-default value in bootstrap."
+}
+
 variable "operator_ip_cidr" {
   type        = string
   description = "Operator's public IP as a /32 CIDR (e.g. 203.0.113.5/32). Added to the Key Vault network ACL so `az keyvault secret set` from the laptop reaches the data plane despite public_network_access_enabled=false. Constitution Principle V: rejects 0.0.0.0/32 and any malformed CIDR."

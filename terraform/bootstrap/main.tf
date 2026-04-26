@@ -30,16 +30,20 @@ resource "random_string" "suffix" {
   # resource and re-apply.
 }
 
-resource "azurerm_resource_group" "state" {
-  name     = "rg-nemoclaw-tfstate"
+# Single shared RG. Both bootstrap (state SA) and root (workload)
+# deploy into this RG. Bootstrap's `terraform destroy` removes the
+# RG only after the SA is gone; root's `terraform destroy` does NOT
+# touch this RG (it reads via data source, doesn't own it).
+resource "azurerm_resource_group" "shared" {
+  name     = var.resource_group_name
   location = var.location
   tags     = local.mandatory_tags
 }
 
 resource "azurerm_storage_account" "state" {
   name                = local.storage_account_name
-  resource_group_name = azurerm_resource_group.state.name
-  location            = azurerm_resource_group.state.location
+  resource_group_name = azurerm_resource_group.shared.name
+  location            = azurerm_resource_group.shared.location
 
   account_tier             = "Standard"
   account_replication_type = "LRS"

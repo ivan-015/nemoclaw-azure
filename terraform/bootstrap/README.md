@@ -12,7 +12,7 @@ of the backend itself.
 
 ## What this stage creates
 
-- One resource group (`rg-nemoclaw-tfstate`).
+- One resource group (`rg-nemoclaw`).
 - One storage account (`tfstate<4-char-suffix>`) with:
   - `public_network_access_enabled = true` but firewalled to a
     single operator-supplied `/32` IP via `network_rules.ip_rules`.
@@ -120,12 +120,12 @@ terraform init
 terraform import \
   -var-file=terraform.tfvars \
   azurerm_resource_group.state \
-  /subscriptions/<sub-id>/resourceGroups/rg-nemoclaw-tfstate
+  /subscriptions/<sub-id>/resourceGroups/rg-nemoclaw
 
 terraform import \
   -var-file=terraform.tfvars \
   azurerm_storage_account.state \
-  /subscriptions/<sub-id>/resourceGroups/rg-nemoclaw-tfstate/providers/Microsoft.Storage/storageAccounts/<storage-account-name>
+  /subscriptions/<sub-id>/resourceGroups/rg-nemoclaw/providers/Microsoft.Storage/storageAccounts/<storage-account-name>
 
 terraform import \
   -var-file=terraform.tfvars \
@@ -164,7 +164,7 @@ network, new ISP, mobile hotspot, VPN flip):
    ```bash
    # Option A — add the new IP via az CLI (control plane).
    az storage account network-rule add \
-     --resource-group rg-nemoclaw-tfstate \
+     --resource-group rg-nemoclaw \
      --account-name <tfstate-account-name> \
      --ip-address "$(curl -s https://api.ipify.org)"
 

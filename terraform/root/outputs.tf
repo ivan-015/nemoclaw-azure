@@ -27,7 +27,7 @@ output "vm_computer_name" {
 }
 
 output "resource_group_name" {
-  value       = azurerm_resource_group.main.name
+  value       = data.azurerm_resource_group.main.name
   description = "Resource group containing the deployment."
 }
 
@@ -47,6 +47,6 @@ output "log_analytics_workspace_id" {
 }
 
 output "start_command" {
-  value       = "az vm start --resource-group ${azurerm_resource_group.main.name} --name ${module.vm.name}"
+  value       = "az vm start --resource-group ${data.azurerm_resource_group.main.name} --name ${module.vm.name}"
   description = "Copy/pasteable `az vm start ...` invocation for waking the VM after auto-shutdown."
 }

@@ -34,6 +34,14 @@ operator_ip_cidr = "<your-public-ip>/32"
 
 # ─── Optional (defaults shown — uncomment to override) ─────────────
 
+# Single shared RG. Default matches terraform/bootstrap/'s default.
+# Only override if you set a non-default value in bootstrap.
+# resource_group_name = "rg-nemoclaw"
+
+# cost-center tag — default 'personal'; set to 'Engineering' or
+# similar when deploying into a work / shared subscription.
+# cost_center = "personal"
+
 # location = "centralus"
 # vm_sku   = "Standard_B4als_v2"
 

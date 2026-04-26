@@ -47,9 +47,6 @@ locals {
   # chars, alphanumeric + hyphen + underscore.
   mi_name = "mi-nemoclaw-${local.suffix}"
 
-  # Shared resource-group name. RG names: ≤90 chars; we keep it short.
-  resource_group_name = "rg-nemoclaw-${local.suffix}"
-
   # Azure DevTest Labs `azurerm_dev_test_global_vm_shutdown_schedule`
   # accepts Windows timezone IDs (e.g. "Pacific Standard Time"), not
   # IANA names. Operators specify IANA in tfvars (the modern, correct

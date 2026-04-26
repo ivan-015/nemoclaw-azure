@@ -39,6 +39,9 @@ auto_shutdown_enabled = false
 
 # ─── Optional (defaults shown — uncomment to override) ─────────────
 
+# resource_group_name = "rg-nemoclaw"
+# cost_center         = "personal"
+
 # location = "centralus"
 # vm_sku   = "Standard_B4als_v2"
 

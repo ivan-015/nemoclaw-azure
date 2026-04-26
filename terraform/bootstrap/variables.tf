@@ -45,3 +45,18 @@ variable "operator_ip_cidr" {
     error_message = "operator_ip_cidr must be a single IPv4 /32 (e.g. 203.0.113.42/32). Broader prefixes and 0.0.0.0/32 are rejected."
   }
 }
+
+# Shared with terraform/root via the same default. Both stages MUST
+# resolve to the same RG name so root's data source can read the RG
+# bootstrap created.
+variable "resource_group_name" {
+  type        = string
+  default     = "rg-nemoclaw"
+  description = "Name of the single shared resource group that holds the Terraform state backend AND the workload resources. Default 'rg-nemoclaw' is the convention used across both stages — only override if you have a naming policy that mandates a prefix."
+}
+
+variable "cost_center" {
+  type        = string
+  default     = "personal"
+  description = "cost-center tag value. Default 'personal' for personal-sub deploys; set to your team/cost-center name when deploying into a work or shared subscription."
+}

@@ -6,9 +6,11 @@
 #   log-analytics ─▶ keyvault (diagnostic settings)
 #                  ─▶ network  (NSG flow logs Traffic Analytics)
 #
-# Resource group is provisioned here (not inside a module) because
-# every module needs its name, and a module that produces an RG is
-# awkward when the RG is shared.
+# The single shared resource group is created by terraform/bootstrap/
+# (it also holds the state SA). This stage reads it via data source
+# and deploys the workload INTO it. `terraform destroy` here removes
+# only the workload resources — bootstrap's RG and state SA stay
+# intact. Full teardown = destroy here, then destroy in bootstrap.
 
 # Pull the operator's AAD identity to flow into the keyvault module's
 # operator_principal_id (auto-grant Key Vault Secrets Officer for
@@ -32,10 +34,13 @@ resource "terraform_data" "input_validation" {
   }
 }
 
-resource "azurerm_resource_group" "main" {
-  name     = local.resource_group_name
-  location = var.location
-  tags     = local.tags
+# Read the single shared RG that terraform/bootstrap/ created.
+# Root deploys workload resources INTO this RG but does not own it —
+# `terraform destroy` here removes only the workload, leaving the RG
+# and the bootstrap state SA intact. For full teardown, run
+# `terraform destroy` in terraform/bootstrap/ as well (after this).
+data "azurerm_resource_group" "main" {
+  name = var.resource_group_name
 }
 
 # ─── Independent foundation modules (parallel) ────────────────────
@@ -43,37 +48,37 @@ resource "azurerm_resource_group" "main" {
 module "log_analytics" {
   source = "./modules/log-analytics"
 
-  resource_group_name = azurerm_resource_group.main.name
+  resource_group_name = data.azurerm_resource_group.main.name
   location            = var.location
   name_suffix         = local.suffix
   tags                = local.tags
   retention_in_days   = 30
 
-  depends_on = [azurerm_resource_group.main]
+  depends_on = [data.azurerm_resource_group.main]
 }
 
 module "identity" {
   source = "./modules/identity"
 
-  resource_group_name = azurerm_resource_group.main.name
+  resource_group_name = data.azurerm_resource_group.main.name
   location            = var.location
   name                = local.mi_name
   tags                = local.tags
 
-  depends_on = [azurerm_resource_group.main]
+  depends_on = [data.azurerm_resource_group.main]
 }
 
 module "network" {
   source = "./modules/network"
 
-  resource_group_name        = azurerm_resource_group.main.name
+  resource_group_name        = data.azurerm_resource_group.main.name
   location                   = var.location
   name_suffix                = local.suffix
   tags                       = local.tags
   log_analytics_workspace_id = module.log_analytics.id
 
   depends_on = [
-    azurerm_resource_group.main,
+    data.azurerm_resource_group.main,
     module.log_analytics,
   ]
 }
@@ -83,7 +88,7 @@ module "network" {
 module "keyvault" {
   source = "./modules/keyvault"
 
-  resource_group_name = azurerm_resource_group.main.name
+  resource_group_name = data.azurerm_resource_group.main.name
   location            = var.location
   name                = local.kv_name
   tags                = local.tags
@@ -108,7 +113,7 @@ module "keyvault" {
 module "vm" {
   source = "./modules/vm"
 
-  resource_group_name = azurerm_resource_group.main.name
+  resource_group_name = data.azurerm_resource_group.main.name
   location            = var.location
   name_suffix         = local.suffix
   tags                = local.tags

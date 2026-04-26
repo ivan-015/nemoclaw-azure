@@ -87,11 +87,12 @@ cd nemoclaw-azure
 
 ---
 
-## 2. Bootstrap the Terraform state backend (run once per subscription)
+## 2. Bootstrap the Terraform state backend (run once per deployment)
 
-This stage creates the storage account that holds Terraform state for
-every subsequent apply. It uses **local** state for itself
-(documented chicken-and-egg). You run it exactly once.
+This stage creates the **single shared resource group** plus the
+storage account that holds Terraform state for every subsequent
+apply. It uses **local** state for itself (documented chicken-and-
+egg). You run it exactly once.
 
 ```bash
 cd terraform/bootstrap
@@ -100,18 +101,23 @@ cd terraform/bootstrap
 cp terraform.tfvars.example terraform.tfvars
 $EDITOR terraform.tfvars
 # Set:
-#   subscription_id = "<your-personal-sub-guid>"
-#   location        = "centralus"
-#   owner           = "<you@example.com>"
+#   subscription_id  = "<your-sub-guid>"
+#   location         = "centralus"
+#   owner            = "<you@example.com>"
+#   operator_ip_cidr = "<your-public-ip>/32"
+# Optional:
+#   cost_center         = "Engineering"   # default 'personal'
+#   resource_group_name = "rg-nemoclaw"   # default; only override if a naming policy demands
 
 terraform init
 terraform apply
 
-# Note the outputs — you'll need them in step 4
+# Capture the outputs — step 4 needs them
 terraform output
-# storage_account_name = "..."
-# resource_group_name  = "..."
-# container_name       = "..."
+# resource_group_name  = "rg-nemoclaw"
+# storage_account_name = "tfstate<4-char-suffix>"
+# container_name       = "tfstate"
+# backend_config_block = "<copy/paste-ready terraform init line>"
 
 cd ../..
 ```
@@ -119,6 +125,12 @@ cd ../..
 The local `bootstrap/terraform.tfstate` is gitignored — keep a backup
 somewhere safe (password manager, encrypted volume). Recovery
 instructions are in `terraform/bootstrap/README.md`.
+
+**Single-RG note**: the bootstrap stage creates the RG; the root
+stage reads it via data source and does NOT own it. `terraform
+destroy` from `terraform/root/` removes only the workload (VM, KV,
+NIC, …) and leaves the RG + state SA intact. Full teardown =
+destroy in root, then destroy in bootstrap.
 
 ---
 
@@ -139,16 +151,20 @@ cd terraform/root
 cp examples/personal.tfvars.example terraform.tfvars
 $EDITOR terraform.tfvars
 # Fill in subscription_id, owner, foundry_endpoint, foundry_deployments,
-# nemoclaw_version. Leave everything else at defaults.
+# nemoclaw_version, operator_ip_cidr. If you set a non-default
+# cost_center / resource_group_name in bootstrap, set them here too.
 
-# Initial init points at the remote backend created in step 2
+# Initial init points at the remote backend created in step 2.
+# Easiest: copy the `backend_config_block` output from step 2.
 terraform init \
-  -backend-config="storage_account_name=<from step 2>" \
-  -backend-config="container_name=<from step 2>" \
-  -backend-config="resource_group_name=<from step 2>" \
-  -backend-config="key=root.tfstate"
+  -backend-config="resource_group_name=<from bootstrap output>" \
+  -backend-config="storage_account_name=<from bootstrap output>" \
+  -backend-config="container_name=<from bootstrap output>" \
+  -backend-config="key=root.tfstate" \
+  -backend-config="use_azuread_auth=true"
 
-# First-stage apply — creates everything except the VM
+# First-stage apply — creates KV, MI, network. Stops short of the VM
+# (which needs the operator-set Tailscale + Foundry secrets).
 terraform apply -target=module.keyvault -target=module.identity -target=module.network
 ```
 
