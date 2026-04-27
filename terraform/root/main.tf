@@ -127,14 +127,17 @@ module "vm" {
   tailscale_secret_name = module.keyvault.tailscale_secret_name
   tailscale_tag         = var.tailscale_tag
 
-  nemoclaw_version    = var.nemoclaw_version
-  foundry_endpoint    = var.foundry_endpoint
-  foundry_deployments = var.foundry_deployments
-  foundry_api_version = var.foundry_deployments[var.foundry_primary_deployment_key].api_version
+  nemoclaw_version = var.nemoclaw_version
+  # Foundry endpoint passed to NemoClaw's `custom` (= "Other OpenAI-
+  # compatible endpoint") provider. Azure Foundry exposes the OpenAI-
+  # compatible surface at /openai/v1 on the resource hostname; we
+  # build the full base URL by appending /openai/v1 to whatever
+  # var.foundry_endpoint resolves to.
+  foundry_base_url = "${var.foundry_endpoint}/openai/v1"
+  foundry_model    = var.foundry_primary_deployment_key
 
-  cloud_init_template_path   = "${path.module}/../../cloud-init/bootstrap.yaml.tpl"
-  systemd_unit_template_path = "${path.module}/../../cloud-init/scripts/nemoclaw.service.tpl"
-  cloud_init_scripts_dir     = "${path.module}/../../cloud-init/scripts"
+  cloud_init_template_path = "${path.module}/../../cloud-init/bootstrap.yaml.tpl"
+  cloud_init_scripts_dir   = "${path.module}/../../cloud-init/scripts"
 
   depends_on = [
     module.keyvault,

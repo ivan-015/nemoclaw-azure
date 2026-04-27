@@ -1,252 +1,172 @@
 #!/usr/bin/env bash
-# 05-nemoclaw.sh — install NemoClaw at the pinned release tag.
+# 05-nemoclaw.sh — install NemoClaw via upstream's official installer
+# (https://www.nvidia.com/nemoclaw.sh) and run a non-interactive
+# `nemoclaw onboard` for the configured inference provider.
 #
-# Constitution Principle V (reproducible): tarball URL is composed
-# from $NEMOCLAW_VERSION and $NEMOCLAW_RELEASE_URL_BASE; the matching
-# SHA-256 file from the same release is fetched and verified BEFORE
-# extraction. A mismatch fails the script (and therefore cloud-init).
+# Why curl|bash over the previous tarball+SHA256 approach:
+# upstream NemoClaw doesn't ship release tarballs; it ships an
+# installer script that clones the pinned tag and runs scripts/
+# install.sh from that ref. Reproducibility comes from
+# NEMOCLAW_INSTALL_TAG (pinned to ${nemoclaw_version}) — the
+# installer git-clones --depth 1 --branch <tag>, so the install is
+# bit-for-bit reproducible at the chosen tag.
 #
-# Spec FR-019: pinned version. Research R1: unattended install via
-# upstream config/env hooks if available; fall back to `expect` with
-# a versioned answers file if the wizard insists on being interactive.
+# Why no systemd unit (vs. the v0.1 design): NemoClaw is CLI-driven,
+# not a daemon. OpenShell + Docker + k3s run as their own services
+# under NemoClaw's management. Operator runs `nemoclaw <name> connect`
+# from a Tailscale SSH session to enter the sandbox.
 #
-# Spec / contract FR-009 hardening: no secret value is written to
-# NemoClaw's runtime config. The Foundry API key arrives at runtime
-# via the credential handoff (US2 / T032–T033). At US1 we install
-# NemoClaw, write its non-secret config, and enable (but do NOT start)
-# the systemd unit — the unit can't run without the key.
+# Principle II compliance: OpenShell intercepts inference traffic on
+# the host (the agent talks to inference.local; OpenShell forwards
+# to the real provider). Provider credentials never enter the
+# sandbox. See docs/THREAT_MODEL.md §"Mediation channel".
 #
-# Inputs:
-#   NEMOCLAW_VERSION              required (e.g. v0.3.1)
-#   NEMOCLAW_RELEASE_URL_BASE     default https://github.com/NVIDIA/NemoClaw/releases/download
-#   FOUNDRY_ENDPOINT              required (URL)
-#   FOUNDRY_DEPLOYMENTS_JSON      required (rendered JSON map)
-#   FOUNDRY_API_VERSION           required
-#   NEMOCLAW_USER                 default nemoclaw
-#   NEMOCLAW_GROUP                default nemoclaw
-#   NEMOCLAW_INSTALL_DIR          default /opt/nemoclaw
-#   NEMOCLAW_CONFIG_DIR           default /etc/nemoclaw
-#   NEMOCLAW_DATA_DIR             default /var/lib/nemoclaw
-#   NEMOCLAW_SERVICE_FILE         default /etc/systemd/system/nemoclaw.service
-#                                 (cloud-init's write_files writes the
-#                                 templated unit here BEFORE this
-#                                 script runs — see 05 step 7 below)
+# Inputs (env vars set by cloud-init runcmd, templated by Terraform):
+#   NEMOCLAW_VERSION        Required. Upstream release tag (e.g. v0.0.26).
+#                           Validated by terraform/root/variables.tf.
+#   NEMOCLAW_OPERATOR_USER  User account that owns the install. NemoClaw's
+#                           installer "runs as your normal user, into
+#                           user-local directories" per upstream docs;
+#                           we run it as this account via sudo -u.
+#   KV_NAME                 Key Vault holding foundry-api-key.
+#   FOUNDRY_SECRET_NAME     Secret name (default: foundry-api-key).
+#   FOUNDRY_BASE_URL        OpenAI-compatible base URL of the Foundry
+#                           endpoint (e.g. https://my.cognitiveservices
+#                           .azure.com/openai/v1).
+#   FOUNDRY_MODEL           Model name = the Foundry deployment name
+#                           (e.g. epl-gpt-4o).
+#   NEMOCLAW_SANDBOX_NAME   Sandbox name (default: nemoclaw).
+#   NEMOCLAW_POLICY_MODE    suggested | custom | skip (default suggested).
 
 set -euo pipefail
 
 : "${NEMOCLAW_VERSION:?missing NEMOCLAW_VERSION}"
-: "${FOUNDRY_ENDPOINT:?missing FOUNDRY_ENDPOINT}"
-: "${FOUNDRY_DEPLOYMENTS_JSON:?missing FOUNDRY_DEPLOYMENTS_JSON}"
-: "${FOUNDRY_API_VERSION:?missing FOUNDRY_API_VERSION}"
+: "${KV_NAME:?missing KV_NAME}"
+: "${FOUNDRY_BASE_URL:?missing FOUNDRY_BASE_URL}"
+: "${FOUNDRY_MODEL:?missing FOUNDRY_MODEL}"
 
-NEMOCLAW_RELEASE_URL_BASE="${NEMOCLAW_RELEASE_URL_BASE:-https://github.com/NVIDIA/NemoClaw/releases/download}"
-NEMOCLAW_USER="${NEMOCLAW_USER:-nemoclaw}"
-NEMOCLAW_GROUP="${NEMOCLAW_GROUP:-nemoclaw}"
-NEMOCLAW_INSTALL_DIR="${NEMOCLAW_INSTALL_DIR:-/opt/nemoclaw}"
-NEMOCLAW_CONFIG_DIR="${NEMOCLAW_CONFIG_DIR:-/etc/nemoclaw}"
-NEMOCLAW_DATA_DIR="${NEMOCLAW_DATA_DIR:-/var/lib/nemoclaw}"
-NEMOCLAW_SERVICE_FILE="${NEMOCLAW_SERVICE_FILE:-/etc/systemd/system/nemoclaw.service}"
+NEMOCLAW_OPERATOR_USER="${NEMOCLAW_OPERATOR_USER:-azureuser}"
+FOUNDRY_SECRET_NAME="${FOUNDRY_SECRET_NAME:-foundry-api-key}"
+NEMOCLAW_SANDBOX_NAME="${NEMOCLAW_SANDBOX_NAME:-nemoclaw}"
+NEMOCLAW_POLICY_MODE="${NEMOCLAW_POLICY_MODE:-suggested}"
 
-TARBALL_URL="${NEMOCLAW_RELEASE_URL_BASE}/${NEMOCLAW_VERSION}/nemoclaw-${NEMOCLAW_VERSION}.tar.gz"
-SHA256_URL="${TARBALL_URL}.sha256"
-
-echo "[05-nemoclaw] installing dependencies"
-apt-get install -y curl tar coreutils expect
-
-echo "[05-nemoclaw] creating ${NEMOCLAW_USER}:${NEMOCLAW_GROUP} system user"
-if ! getent group "$NEMOCLAW_GROUP" > /dev/null; then
-  groupadd --system "$NEMOCLAW_GROUP"
-fi
-if ! getent passwd "$NEMOCLAW_USER" > /dev/null; then
-  useradd --system \
-    --gid "$NEMOCLAW_GROUP" \
-    --home-dir "$NEMOCLAW_DATA_DIR" \
-    --shell /usr/sbin/nologin \
-    "$NEMOCLAW_USER"
-fi
-
-install -d -m 0750 -o "$NEMOCLAW_USER" -g "$NEMOCLAW_GROUP" \
-  "$NEMOCLAW_INSTALL_DIR" \
-  "$NEMOCLAW_CONFIG_DIR" \
-  "$NEMOCLAW_DATA_DIR"
-
-# ─── Download + verify ────────────────────────────────────────────
-
-WORK_DIR="$(mktemp -d)"
-trap 'rm -rf "$WORK_DIR"' EXIT
-
-echo "[05-nemoclaw] downloading $TARBALL_URL"
-curl -fsSL "$TARBALL_URL" -o "$WORK_DIR/nemoclaw.tar.gz"
-
-echo "[05-nemoclaw] downloading $SHA256_URL"
-curl -fsSL "$SHA256_URL" -o "$WORK_DIR/nemoclaw.tar.gz.sha256"
-
-echo "[05-nemoclaw] verifying checksum"
-cd "$WORK_DIR"
-# Upstream sha256 file is typically `<sha>  nemoclaw-<version>.tar.gz`.
-# Rewrite the filename column to match what we saved locally so
-# `sha256sum -c` finds the file.
-SHA="$(awk '{print $1}' nemoclaw.tar.gz.sha256)"
-echo "${SHA}  nemoclaw.tar.gz" | sha256sum -c -
-
-echo "[05-nemoclaw] extracting to $NEMOCLAW_INSTALL_DIR"
-tar -xzf nemoclaw.tar.gz -C "$NEMOCLAW_INSTALL_DIR" --strip-components=1
-chown -R "$NEMOCLAW_USER:$NEMOCLAW_GROUP" "$NEMOCLAW_INSTALL_DIR"
-
-# ─── Run installer ────────────────────────────────────────────────
+# ─── Ensure operator user exists ──────────────────────────────────
 #
-# Research R1 priority order:
-#   1. Config-file or env-var hooks if upstream exposes them
-#   2. `expect` consuming a versioned answers file if not
-#   3. Smoke-test `nemoclaw doctor` regardless of which path was taken
-
-cd "$NEMOCLAW_INSTALL_DIR"
-
-INSTALLER_SCRIPT=""
-for candidate in install.sh bin/install scripts/install; do
-  if [[ -x "$candidate" ]]; then
-    INSTALLER_SCRIPT="$candidate"
-    break
-  fi
-done
-
-if [[ -n "$INSTALLER_SCRIPT" ]]; then
-  echo "[05-nemoclaw] running installer: $INSTALLER_SCRIPT"
-
-  if [[ -n "${NEMOCLAW_INSTALL_NONINTERACTIVE_FLAG:-}" ]]; then
-    # Path 1: upstream supports a flag like --yes or --unattended.
-    sudo -u "$NEMOCLAW_USER" \
-      env HOME="$NEMOCLAW_DATA_DIR" PATH="$PATH" \
-      "./$INSTALLER_SCRIPT" "$NEMOCLAW_INSTALL_NONINTERACTIVE_FLAG"
-  elif [[ -f /etc/nemoclaw/nemoclaw-answers.expect ]]; then
-    # Path 2: cloud-init dropped a versioned `expect` answers file.
-    expect -f /etc/nemoclaw/nemoclaw-answers.expect \
-      "./$INSTALLER_SCRIPT"
-  else
-    echo "[05-nemoclaw] WARNING: no unattended install path. Running" >&2
-    echo "[05-nemoclaw] the installer with /dev/null on stdin in case" >&2
-    echo "[05-nemoclaw] it accepts default-on-EOF behaviour." >&2
-    sudo -u "$NEMOCLAW_USER" \
-      env HOME="$NEMOCLAW_DATA_DIR" PATH="$PATH" \
-      "./$INSTALLER_SCRIPT" < /dev/null
-  fi
-else
-  echo "[05-nemoclaw] no installer script found in tarball — assuming"
-  echo "[05-nemoclaw] tarball ships ready-to-run binaries"
-fi
-
-# ─── Write non-secret runtime config ──────────────────────────────
-#
-# Per spec Q2 + FR-013: only the non-secret Foundry config lives on
-# disk. Foundry API key never appears here — it arrives at service
-# startup via the credential handoff (US2).
-#
-# Format follows NemoClaw's documented YAML config; the exact key
-# names may need adjustment after upstream verification on first
-# boot (the implementer fills this in with the real schema).
-
-cat > "$NEMOCLAW_CONFIG_DIR/config.yaml" <<EOF
-# Generated by cloud-init at NemoClaw install time.
-# DO NOT add API keys here — secrets reach NemoClaw via systemd
-# EnvironmentFile= from a tmpfs file populated by the credential
-# handoff (see /usr/local/bin/nemoclaw-credential-handoff).
-
-inference:
-  provider: azure-openai
-  endpoint: ${FOUNDRY_ENDPOINT}
-  api_version: ${FOUNDRY_API_VERSION}
-  deployments: ${FOUNDRY_DEPLOYMENTS_JSON}
-EOF
-chown "$NEMOCLAW_USER:$NEMOCLAW_GROUP" "$NEMOCLAW_CONFIG_DIR/config.yaml"
-chmod 0640 "$NEMOCLAW_CONFIG_DIR/config.yaml"
-
-# ─── systemd unit ─────────────────────────────────────────────────
-#
-# The unit file itself is rendered by Terraform (templatefile() over
-# nemoclaw.service.tpl) and dropped into place by cloud-init's
-# write_files BEFORE this script runs. Here we just reload + enable.
-# Starting the unit is deferred until after the doctor smoke test
-# below so a packaging bug in the tarball surfaces as a clear
-# "doctor failed" rather than a tangle of systemd restart-loop noise.
-
-if [[ ! -f "$NEMOCLAW_SERVICE_FILE" ]]; then
-  echo "[05-nemoclaw] FATAL: $NEMOCLAW_SERVICE_FILE missing." >&2
-  echo "[05-nemoclaw]   cloud-init's write_files should have written it." >&2
+# NemoClaw installs into the operator's home directory via nvm + npm.
+# `azureuser` is created by Azure with a real home dir; we just
+# ensure it has the directories the installer needs.
+echo "[05-nemoclaw] ensuring operator user '$NEMOCLAW_OPERATOR_USER' is set up"
+if ! getent passwd "$NEMOCLAW_OPERATOR_USER" > /dev/null; then
+  echo "[05-nemoclaw] FATAL: operator user '$NEMOCLAW_OPERATOR_USER' does not exist." >&2
+  echo "[05-nemoclaw] Azure usually creates the admin_username on Linux VMs;" >&2
+  echo "[05-nemoclaw] verify Terraform's azurerm_linux_virtual_machine." >&2
   exit 1
 fi
 
-systemctl daemon-reload
-systemctl enable nemoclaw.service
-echo "[05-nemoclaw] unit enabled"
+OPERATOR_HOME="$(getent passwd "$NEMOCLAW_OPERATOR_USER" | cut -d: -f6)"
+install -d -m 0700 -o "$NEMOCLAW_OPERATOR_USER" -g "$NEMOCLAW_OPERATOR_USER" "$OPERATOR_HOME/.nemoclaw"
 
-# ─── Smoke test ───────────────────────────────────────────────────
+# Operator must be in the docker group — NemoClaw drives Docker for
+# OpenShell + the sandbox. 02-docker.sh installed the daemon; we
+# add the user here.
+if ! id -nG "$NEMOCLAW_OPERATOR_USER" | tr ' ' '\n' | grep -qx docker; then
+  echo "[05-nemoclaw] adding $NEMOCLAW_OPERATOR_USER to docker group"
+  usermod -aG docker "$NEMOCLAW_OPERATOR_USER"
+fi
+
+# ─── Fetch Foundry API key from Key Vault ─────────────────────────
 #
-# Per US1 acceptance scenario 4: `nemoclaw doctor` (or upstream's
-# documented health command) must exit 0. The exact binary path
-# depends on what the tarball ships.
+# Cloud-init runs as root with the VM's managed identity attached.
+# We fetch the secret here, hand it to the NemoClaw installer via
+# env var, then unset locally. The installer hands it to OpenShell
+# which persists the credential in the operator's user-local config
+# (~/.nemoclaw/) — that's NemoClaw upstream's design and the trust
+# boundary.
 
-NEMOCLAW_BIN=""
-for candidate in \
-  "$NEMOCLAW_INSTALL_DIR/bin/nemoclaw" \
-  "$NEMOCLAW_INSTALL_DIR/nemoclaw" \
-  /usr/local/bin/nemoclaw; do
-  if [[ -x "$candidate" ]]; then
-    NEMOCLAW_BIN="$candidate"
-    break
-  fi
-done
+echo "[05-nemoclaw] authenticating to Azure via VM managed identity"
+az login --identity --output none
 
-if [[ -z "$NEMOCLAW_BIN" ]]; then
-  echo "[05-nemoclaw] FATAL: nemoclaw binary not found after install." >&2
+echo "[05-nemoclaw] fetching $FOUNDRY_SECRET_NAME from Key Vault $KV_NAME"
+FOUNDRY_API_KEY="$(
+  az keyvault secret show \
+    --vault-name "$KV_NAME" \
+    --name "$FOUNDRY_SECRET_NAME" \
+    --query value -o tsv
+)"
+
+if [[ -z "$FOUNDRY_API_KEY" || "$FOUNDRY_API_KEY" == PLACEHOLDER* ]]; then
+  echo "[05-nemoclaw] FATAL: $FOUNDRY_SECRET_NAME is empty or still the Terraform placeholder." >&2
+  echo "[05-nemoclaw]   Run: az keyvault secret set --vault-name $KV_NAME --name $FOUNDRY_SECRET_NAME --value <real-key>" >&2
+  echo "[05-nemoclaw]   Then re-run cloud-init or this script via Run Command." >&2
   exit 1
 fi
 
-# Make the binary discoverable on PATH for operator convenience.
-ln -sf "$NEMOCLAW_BIN" /usr/local/bin/nemoclaw
-
-echo "[05-nemoclaw] running smoke test: nemoclaw doctor"
-# `nemoclaw doctor` here runs as the nemoclaw user WITHOUT
-# OPENAI_API_KEY in its environ — this is an install-integrity
-# check, not a runtime check. If upstream's doctor command treats a
-# missing API key as fatal, we accept it as a soft warning here;
-# the runtime check is the systemctl start a few lines below, which
-# DOES have OPENAI_API_KEY (via the credential handoff +
-# EnvironmentFile=).
-if sudo -u "$NEMOCLAW_USER" \
-     env HOME="$NEMOCLAW_DATA_DIR" PATH="$PATH" \
-     "$NEMOCLAW_BIN" doctor; then
-  echo "[05-nemoclaw] doctor passed."
-else
-  echo "[05-nemoclaw] WARNING: \`nemoclaw doctor\` returned non-zero." >&2
-  echo "[05-nemoclaw] If the failure is anything OTHER than a missing" >&2
-  echo "[05-nemoclaw] API key, this is a real problem — investigate"   >&2
-  echo "[05-nemoclaw] via journalctl -u nemoclaw before using the"     >&2
-  echo "[05-nemoclaw] deployment."                                     >&2
-fi
-
-# ─── Start the service (US2 / T033) ───────────────────────────────
+# ─── Run upstream installer non-interactively ─────────────────────
 #
-# At US2 the credential handoff is wired via ExecStartPre=+ — the
-# Foundry API key reaches NemoClaw's host process at startup via the
-# tmpfs handoff documented in contracts/credential-handoff.md.
-# Starting the unit triggers the handoff for the first time; the
-# operator's `verify.sh` then runs SC-004 / SC-008 to confirm the
-# tooth-check passes.
+# NEMOCLAW_INSTALL_TAG pins the install to a specific git ref —
+# the installer clones that branch with --depth 1 and runs
+# scripts/install.sh from it. Reproducibility per Principle V.
 #
-# We don't `--wait` here: cloud-init's runcmd is single-threaded and
-# we don't want the whole bootstrap to block on Type=notify if
-# NemoClaw's notify support is flaky. Type=notify with a missing
-# ready-signal would hang the unit until DefaultTimeoutStartSec
-# (90s) anyway — the operator sees the eventual state via
-# verify.sh + journalctl.
-echo "[05-nemoclaw] starting nemoclaw.service (credential handoff fires here)"
-systemctl start nemoclaw.service || {
-  echo "[05-nemoclaw] WARNING: systemctl start nemoclaw.service returned non-zero." >&2
-  echo "[05-nemoclaw] Inspect via \`journalctl -u nemoclaw --no-pager -n 200\`."   >&2
-  echo "[05-nemoclaw] Common causes: foundry-api-key still PLACEHOLDER in KV"     >&2
-  echo "[05-nemoclaw] (run \`az keyvault secret set\` per quickstart.md §3,"      >&2
-  echo "[05-nemoclaw] then \`systemctl restart nemoclaw\`); MI lacks Secrets-User" >&2
-  echo "[05-nemoclaw] RBAC; KV network ACL blocks the VM subnet."                 >&2
+# NEMOCLAW_PROVIDER=custom is "Other OpenAI-compatible endpoint" per
+# docs/inference/inference-options.md — Azure Foundry exposes an
+# OpenAI-compatible /openai/v1/ surface that NemoClaw's `custom`
+# provider hits cleanly. COMPATIBLE_API_KEY is the credential env
+# var for this provider.
+#
+# The installer runs as the operator user (sudo -u). `runuser -l`
+# is preferred over `sudo -u` here because it sets up a full login
+# environment (PATH, HOME, etc.) which the installer expects.
+
+echo "[05-nemoclaw] running NemoClaw installer pinned to $NEMOCLAW_VERSION"
+
+INSTALLER_LOG="$OPERATOR_HOME/.nemoclaw/installer.log"
+install -m 0600 -o "$NEMOCLAW_OPERATOR_USER" -g "$NEMOCLAW_OPERATOR_USER" /dev/null "$INSTALLER_LOG"
+
+# Construct the env block for the installer. We keep the API key in
+# a single env var so it doesn't bleed into the surrounding shell's
+# `env` listing or get logged by `set -x` in subshells.
+export FOUNDRY_API_KEY
+
+runuser -l "$NEMOCLAW_OPERATOR_USER" -- bash -c '
+  set -euo pipefail
+  cd "$HOME"
+  curl -fsSL https://www.nvidia.com/nemoclaw.sh | \
+    NEMOCLAW_INSTALL_TAG='"'$NEMOCLAW_VERSION'"' \
+    NEMOCLAW_NON_INTERACTIVE=1 \
+    NEMOCLAW_ACCEPT_THIRD_PARTY_SOFTWARE=1 \
+    NEMOCLAW_PROVIDER=custom \
+    NEMOCLAW_MODEL='"'$FOUNDRY_MODEL'"' \
+    NEMOCLAW_SANDBOX_NAME='"'$NEMOCLAW_SANDBOX_NAME'"' \
+    NEMOCLAW_POLICY_MODE='"'$NEMOCLAW_POLICY_MODE'"' \
+    COMPATIBLE_API_KEY="$FOUNDRY_API_KEY" \
+    COMPATIBLE_BASE_URL='"'$FOUNDRY_BASE_URL'"' \
+    bash 2>&1
+' >> "$INSTALLER_LOG" 2>&1 || {
+  echo "[05-nemoclaw] FATAL: installer failed. See $INSTALLER_LOG (last 80 lines):" >&2
+  tail -n 80 "$INSTALLER_LOG" >&2
+  unset FOUNDRY_API_KEY
+  exit 1
 }
 
-echo "[05-nemoclaw] install complete at $NEMOCLAW_VERSION."
+# Scrub the API key from this script's environment. The installer
+# has handed it to OpenShell which persisted it; we don't need it
+# in this process anymore.
+unset FOUNDRY_API_KEY
+
+# ─── Smoke test: nemoclaw status as the operator ──────────────────
+#
+# `nemoclaw status` is upstream's documented health command. If
+# the installer + onboard succeeded, this exits 0 and prints the
+# sandbox state.
+
+echo "[05-nemoclaw] running smoke test: nemoclaw status"
+if runuser -l "$NEMOCLAW_OPERATOR_USER" -- bash -c 'nemoclaw status' >> "$INSTALLER_LOG" 2>&1; then
+  echo "[05-nemoclaw] nemoclaw status exited 0 — install + onboard succeeded."
+else
+  echo "[05-nemoclaw] WARNING: nemoclaw status returned non-zero." >&2
+  echo "[05-nemoclaw]   See $INSTALLER_LOG for details." >&2
+  echo "[05-nemoclaw]   Common cause: validation-time call to the Foundry endpoint failed." >&2
+  echo "[05-nemoclaw]   Fix: verify FOUNDRY_BASE_URL + FOUNDRY_MODEL + the secret value, then re-run." >&2
+fi
+
+echo "[05-nemoclaw] install complete at $NEMOCLAW_VERSION (sandbox: $NEMOCLAW_SANDBOX_NAME, log: $INSTALLER_LOG)"

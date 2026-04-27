@@ -83,18 +83,23 @@ if [[ -z "$TAILSCALE_AUTH_KEY" || "$TAILSCALE_AUTH_KEY" == PLACEHOLDER* ]]; then
 fi
 
 echo "[01-tailscale] registering node on tailnet"
-# Pass the key via TS_AUTHKEY env var rather than --authkey= on the
-# command line. The argv path lands the key in /proc/<pid>/cmdline
-# (visible to any uid via `ps`); environ is readable only by the
-# same uid + root, materially smaller surface (Phase 3 review H1).
-# Tailscale ≥ 1.20 supports TS_AUTHKEY natively.
+# Pass the key via --auth-key flag. Earlier iterations used the
+# TS_AUTHKEY env var (cleaner — keeps the key out of /proc/<pid>/cmdline)
+# but Tailscale 1.96.x silently ignored that env var and fell back to
+# interactive OAuth, which then hangs cloud-init for the full Run-Command
+# timeout window. Argv exposure is acceptable here: the VM has no
+# untrusted local users (only root + nemoclaw), and the auth key is
+# single-use ephemeral with a 24h Tailscale-side expiry, so any
+# residual /proc visibility during the few seconds of `tailscale up`
+# is bounded.
 #
 # --ssh=true enables Tailscale SSH (operator gets a shell without
 # any inbound NSG rule and without us issuing SSH keys — FR-005).
 # --advertise-tags scopes the node under the operator's ACL.
 # --hostname is deterministic so `tailscale ping <hostname>` works
 # from any tailnet device.
-TS_AUTHKEY="$TAILSCALE_AUTH_KEY" tailscale up \
+tailscale up \
+  --auth-key="$TAILSCALE_AUTH_KEY" \
   --ssh=true \
   --advertise-tags="$TAILSCALE_TAG" \
   --hostname="$TAILSCALE_HOSTNAME" \

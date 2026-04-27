@@ -39,56 +39,35 @@ resource "tls_private_key" "unreachable" {
   algorithm = "ED25519"
 }
 
-# ─── Render the systemd unit FIRST ────────────────────────────────
-#
-# The unit text becomes one of the substitutions in the cloud-init
-# YAML. At US1 the unit's ExecStartPre is /bin/true placeholder —
-# the kv_name/foundry_endpoint substitutions below are still passed
-# in so US2 (T033) can swap to the real handoff without re-plumbing.
-
 locals {
-  rendered_systemd_unit = templatefile(var.systemd_unit_template_path, {
-    kv_name             = var.kv_name
-    foundry_endpoint    = var.foundry_endpoint
-    foundry_api_version = var.foundry_api_version
-  })
-
   # Read each cloud-init script as bytes; cloud-init's b64-decode in
   # write_files avoids shell-metacharacter quoting hazards.
-  script_01_tailscale          = file("${var.cloud_init_scripts_dir}/01-tailscale.sh")
-  script_02_docker             = file("${var.cloud_init_scripts_dir}/02-docker.sh")
-  script_03_node               = file("${var.cloud_init_scripts_dir}/03-node.sh")
-  script_04_credential_handoff = file("${var.cloud_init_scripts_dir}/04-credential-handoff.sh")
-  script_05_nemoclaw           = file("${var.cloud_init_scripts_dir}/05-nemoclaw.sh")
-
-  # JSON-render the deployments map for cloud-init. NemoClaw's
-  # config.yaml needs a YAML object, but YAML is a superset of JSON
-  # so a JSON literal is a valid YAML value. Avoids a yamlencode()
-  # round-trip with quoting risk.
-  foundry_deployments_json = jsonencode(var.foundry_deployments)
+  script_01_tailscale = file("${var.cloud_init_scripts_dir}/01-tailscale.sh")
+  script_02_docker    = file("${var.cloud_init_scripts_dir}/02-docker.sh")
+  script_03_node      = file("${var.cloud_init_scripts_dir}/03-node.sh")
+  script_05_nemoclaw  = file("${var.cloud_init_scripts_dir}/05-nemoclaw.sh")
 
   # Stable VM hostname (also used as the Tailscale --hostname).
   # Tailscale's hostname field is a label; lowercase + hyphens only.
   vm_hostname = "nemoclaw-${var.name_suffix}"
 
   rendered_cloud_init = templatefile(var.cloud_init_template_path, {
-    kv_name                          = var.kv_name
-    tailscale_secret_name            = var.tailscale_secret_name
-    tailscale_tag                    = var.tailscale_tag
-    tailscale_hostname               = local.vm_hostname
-    docker_version                   = var.docker_version
-    node_major                       = var.node_major
-    nemoclaw_version                 = var.nemoclaw_version
-    nemoclaw_release_url_base        = var.nemoclaw_release_url_base
-    foundry_endpoint                 = var.foundry_endpoint
-    foundry_deployments_json         = local.foundry_deployments_json
-    foundry_api_version              = var.foundry_api_version
-    b64_script_01_tailscale          = base64encode(local.script_01_tailscale)
-    b64_script_02_docker             = base64encode(local.script_02_docker)
-    b64_script_03_node               = base64encode(local.script_03_node)
-    b64_script_04_credential_handoff = base64encode(local.script_04_credential_handoff)
-    b64_script_05_nemoclaw           = base64encode(local.script_05_nemoclaw)
-    b64_systemd_unit                 = base64encode(local.rendered_systemd_unit)
+    kv_name                 = var.kv_name
+    tailscale_secret_name   = var.tailscale_secret_name
+    tailscale_tag           = var.tailscale_tag
+    tailscale_hostname      = local.vm_hostname
+    docker_version          = var.docker_version
+    node_major              = var.node_major
+    nemoclaw_version        = var.nemoclaw_version
+    nemoclaw_operator_user  = var.nemoclaw_operator_user
+    nemoclaw_sandbox_name   = var.nemoclaw_sandbox_name
+    nemoclaw_policy_mode    = var.nemoclaw_policy_mode
+    foundry_base_url        = var.foundry_base_url
+    foundry_model           = var.foundry_model
+    b64_script_01_tailscale = base64encode(local.script_01_tailscale)
+    b64_script_02_docker    = base64encode(local.script_02_docker)
+    b64_script_03_node      = base64encode(local.script_03_node)
+    b64_script_05_nemoclaw  = base64encode(local.script_05_nemoclaw)
   })
 }
 

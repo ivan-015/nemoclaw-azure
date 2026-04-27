@@ -4,9 +4,9 @@
 # managed-disk OS disk with platform-managed encryption, user-assigned
 # MI attached.
 #
-# Cloud-init substitutions and the systemd unit render are done HERE,
-# not in main.tf, so the module is self-contained and the parent only
-# passes structured inputs.
+# Cloud-init substitutions are done HERE, not in main.tf, so the
+# module is self-contained and the parent only passes structured
+# inputs.
 
 variable "resource_group_name" {
   type        = string
@@ -61,7 +61,7 @@ variable "image" {
 
   validation {
     condition     = var.image.version != "latest" && var.image.version != ""
-    error_message = "image.version must be a concrete Marketplace version string (e.g. 24.04.202504150). 'latest' is rejected to preserve reproducibility (Principle V)."
+    error_message = "image.version must be a concrete Marketplace version string (e.g. 24.04.202604160). 'latest' is rejected to preserve reproducibility (Principle V)."
   }
 }
 
@@ -89,7 +89,7 @@ variable "managed_identity_id" {
 
 variable "kv_name" {
   type        = string
-  description = "Key Vault name. Cloud-init's 01-tailscale.sh fetches the Tailscale auth key from it."
+  description = "Key Vault name. Cloud-init's 01-tailscale.sh fetches the Tailscale auth key from it; 05-nemoclaw.sh fetches the Foundry API key from it."
 }
 
 variable "tailscale_secret_name" {
@@ -104,31 +104,40 @@ variable "tailscale_tag" {
 
 variable "nemoclaw_version" {
   type        = string
-  description = "Pinned NemoClaw release tag."
+  description = "Pinned NemoClaw release tag (e.g. v0.0.26). The upstream installer (https://www.nvidia.com/nemoclaw.sh) clones this ref via NEMOCLAW_INSTALL_TAG."
 }
 
-variable "nemoclaw_release_url_base" {
+variable "nemoclaw_operator_user" {
   type        = string
-  default     = "https://github.com/NVIDIA/NemoClaw/releases/download"
-  description = "GitHub Releases URL base. Override only if upstream moves."
+  default     = "azureuser"
+  description = "Linux user that owns the NemoClaw install. Upstream installs into this user's home dir via nvm + npm. Defaults to Azure's standard admin_username."
 }
 
-variable "foundry_endpoint" {
+variable "nemoclaw_sandbox_name" {
   type        = string
-  description = "Azure AI Foundry endpoint URL."
+  default     = "nemoclaw"
+  description = "OpenShell sandbox name created by `nemoclaw onboard`. Operator references this when running `nemoclaw <name> connect`."
 }
 
-variable "foundry_deployments" {
-  type = map(object({
-    model       = string
-    api_version = string
-  }))
-  description = "Map of deployment name → {model, api_version}. JSON-rendered into cloud-init."
-}
-
-variable "foundry_api_version" {
+variable "nemoclaw_policy_mode" {
   type        = string
-  description = "API version for the credential-handoff env (templated in the systemd unit). For now we surface the api_version of the *primary* deployment as a top-level value; if NemoClaw needs per-deployment versions, this becomes a JSON map."
+  default     = "suggested"
+  description = "Policy mode for the sandbox. 'suggested' applies upstream's default policy presets; 'custom' lets the operator choose presets; 'skip' creates a sandbox with no policy."
+
+  validation {
+    condition     = contains(["suggested", "custom", "skip"], var.nemoclaw_policy_mode)
+    error_message = "nemoclaw_policy_mode must be one of: suggested, custom, skip."
+  }
+}
+
+variable "foundry_base_url" {
+  type        = string
+  description = "OpenAI-compatible base URL for the Foundry endpoint (e.g. https://my.cognitiveservices.azure.com/openai/v1). NemoClaw's `custom` provider hits this."
+}
+
+variable "foundry_model" {
+  type        = string
+  description = "Foundry deployment name (e.g. epl-gpt-4o). Used as the OpenAI-compatible model identifier."
 }
 
 variable "docker_version" {
@@ -147,15 +156,10 @@ variable "node_major" {
 
 variable "cloud_init_template_path" {
   type        = string
-  description = "Filesystem path to bootstrap.yaml.tpl. Resolved relative to the parent module's path. Default constructed in main.tf via path.module."
-}
-
-variable "systemd_unit_template_path" {
-  type        = string
-  description = "Filesystem path to nemoclaw.service.tpl."
+  description = "Filesystem path to bootstrap.yaml.tpl. Resolved relative to the parent module's path."
 }
 
 variable "cloud_init_scripts_dir" {
   type        = string
-  description = "Filesystem path to the directory holding 01-tailscale.sh, 02-docker.sh, etc."
+  description = "Filesystem path to the directory holding 01-tailscale.sh, 02-docker.sh, 03-node.sh, 05-nemoclaw.sh."
 }
