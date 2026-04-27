@@ -227,21 +227,50 @@ before using the deployment.
 
 ## 6. Use NemoClaw
 
+The cloud-init flow runs upstream's NemoClaw installer at the pinned
+tag, then `nemoclaw onboard` non-interactively, leaving you with an
+OpenShell-managed sandbox in `Phase: Ready`. From your laptop, on
+the tailnet:
+
 ```bash
-# From your laptop, on the tailnet:
+# Default sandbox name is 'nemoclaw' (override via NEMOCLAW_SANDBOX_NAME).
 VM=$(terraform output -raw vm_tailnet_hostname)
 
-tailscale ssh $VM
-# you're now on the VM
-nemoclaw                      # whatever your version's CLI is
+# Land a shell on the VM as azureuser.
+tailscale ssh azureuser@$VM
+
+# On the VM, see your sandbox:
+nemoclaw status
+
+# Enter the sandbox (one process tree per session):
+nemoclaw nemoclaw connect
+
+# Inside the sandbox, talk to OpenClaw:
+openclaw tui
 ```
 
-When NemoClaw's systemd unit starts, the `ExecStartPre` script fetches
-the Foundry API key from Key Vault (managed identity), writes it to a
-tmpfs file at `/run/nemoclaw/env`, NemoClaw's host process consumes
-it via systemd `EnvironmentFile=`, and the file is unlinked. NemoClaw's
-own architecture isolates the sandboxed agent from this env var. You
-won't see the secret anywhere in your shell.
+How the credential reaches inference without ever entering the
+sandbox: cloud-init's `05-nemoclaw.sh` ran the upstream installer
+with `NEMOCLAW_PROVIDER=custom` + `COMPATIBLE_API_KEY=<from KV>`
++ `NEMOCLAW_ENDPOINT_URL=<your Foundry /openai/v1>`. The installer
+persisted the credential under `~/.nemoclaw/credentials.json`
+(mode 0600). At runtime the OpenShell gateway on the host
+intercepts every inference request the agent makes (the agent
+talks to `inference.local`; only OpenShell can resolve that), and
+forwards it to Foundry with the credential injected. The sandbox's
+filesystem-policy explicitly excludes the operator's home dir, so
+the agent cannot read the credentials file. See
+`docs/THREAT_MODEL.md` §"Mediation channel".
+
+For the OpenClaw browser UI (dashboard), forward the dashboard
+port via Tailscale SSH:
+
+```bash
+tailscale ssh -L 18789:127.0.0.1:18789 azureuser@$VM
+# Then open http://127.0.0.1:18789/ in your browser. The tokenized
+# URL was printed once at install time; if you lost it, regenerate
+# via `nemoclaw nemoclaw dashboard` on the VM.
+```
 
 ---
 
@@ -261,20 +290,40 @@ $(terraform output -raw start_command)
 tailscale ping $(terraform output -raw vm_tailnet_hostname)
 ```
 
-The credential handoff fires on every service start, so post-
-deallocation NemoClaw re-fetches the Foundry API key from Key Vault
-without operator intervention. If Tailscale doesn't come back
-within ~3 min, jump to §8 troubleshooting.
+After deallocation + start, the OpenShell gateway and sandbox
+container come back up with the persisted credentials in
+`~/.nemoclaw/credentials.json`. No re-onboard needed. If Tailscale
+doesn't come back within ~3 min, jump to §8 troubleshooting.
 
 ### Rotating the Foundry key
 
+NemoClaw's OpenShell gateway persists the credential locally — the
+KV update alone doesn't propagate. You re-onboard with the new key:
+
 ```bash
 KV=$(terraform output -raw key_vault_name)
+VM=$(terraform output -raw vm_tailnet_hostname)
+
+# 1. Update KV (new key from your Foundry portal).
 az keyvault secret set --vault-name "$KV" --name foundry-api-key --value "<new-key>"
-# Restart NemoClaw to pick up the new value (the credential handoff
-# script fetches fresh from KV at every service start):
-tailscale ssh $(terraform output -raw vm_tailnet_hostname) -- sudo systemctl restart nemoclaw
+
+# 2. On the VM, reset the credential and re-onboard. `nemoclaw
+#    credentials reset` clears the old key from
+#    ~/.nemoclaw/credentials.json; `nemoclaw onboard` reads the new
+#    one from KV via the same managed-identity flow cloud-init used.
+tailscale ssh azureuser@$VM
+nemoclaw credentials reset COMPATIBLE_API_KEY
+# Trigger the same non-interactive onboard cloud-init ran:
+NEMOCLAW_NON_INTERACTIVE=1 \
+NEMOCLAW_PROVIDER=custom \
+NEMOCLAW_ENDPOINT_URL='https://<your-foundry>.cognitiveservices.azure.com/openai/v1' \
+NEMOCLAW_MODEL='<your-deployment-name>' \
+COMPATIBLE_API_KEY="$(az keyvault secret show --vault-name $KV --name foundry-api-key --query value -o tsv)" \
+nemoclaw onboard --resume
 ```
+
+The OpenShell gateway picks up the new key on next inference call.
+No VM restart needed.
 
 ### Upgrading NemoClaw
 

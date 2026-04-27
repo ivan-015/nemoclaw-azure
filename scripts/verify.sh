@@ -4,32 +4,29 @@
 #
 # Source-of-truth: specs/001-hardened-nemoclaw-deploy/contracts/verification-checks.md
 #
-# At Phase 3 (US1) + Phase 4 (US2) + Phase 5 (US3) + Phase 7 (US5)
-# this script implements:
+# Aligned with the upstream-NemoClaw architecture (curl|bash installer +
+# `nemoclaw onboard` + OpenShell-on-host inference proxy). The earlier
+# JIT-tmpfs / systemd-unit checks (US2 EC-4, etc.) were retired when the
+# install model changed; see docs/THREAT_MODEL.md §"Mediation channel".
+#
+# This script implements:
 #   - Pre-flight: 0a, 0b, 0c
 #   - SC-001: 3a (tailscale ping), 3b (Tailscale SSH lands)
-#   - SC-002: apply timing (advisory — caller wraps `terraform apply`
-#             with `time` themselves; this script reports the live VM
-#             state instead)
+#   - SC-002: apply timing (advisory)
 #   - SC-003: 2a (no public IP), 2b (zero NSG inbound allow rules),
 #             2c (port scan reminder, manual)
-#   - SC-004: 4a–4e Principle II tooth-check (sandboxed agent never
-#             sees the KV value)
-#   - SC-005: cost reminder (advisory — prints Cost Management URL)
-#   - SC-006: post-shutdown deallocation (active only after the
-#             scheduled shutdown time)
-#   - SC-007: start-to-tailscale-reachable timing (opt-in via
-#             VERIFY_TEST_START_LATENCY=1 — destructive: deallocates
-#             the VM)
-#   - SC-008: KV audit landing (every SecretGet recorded in LA)
-#   - SC-009: destroy + redeploy is clean (opt-in via
-#             VERIFY_TEST_DESTROY_REDEPLOY=1 — destructive: tears
-#             the deployment down and re-creates it with a fresh
-#             KV-name suffix)
-#   - EC-2:   Foundry key rotation propagates after restart
-#             (manual / advisory)
-#   - EC-4:   tmpfs handoff file unlinked promptly
-#   - EC-5:   handoff cannot leak the Tailscale auth key
+#   - SC-004: Principle II tooth-check — KV value must NOT appear in
+#             any OpenShell-managed sandbox container's environ or
+#             cmdline; ~/.nemoclaw/credentials.json must be 0600.
+#   - SC-005: cost reminder (advisory)
+#   - SC-006: post-shutdown deallocation (active after 21:10 PT)
+#   - SC-007: start-to-tailscale-reachable timing (opt-in:
+#             VERIFY_TEST_START_LATENCY=1 — destructive)
+#   - SC-008: KV audit landing (SecretGet recorded in LA)
+#   - SC-009: destroy + redeploy is clean (opt-in:
+#             VERIFY_TEST_DESTROY_REDEPLOY=1 — destructive)
+#   - EC-2:   Foundry key rotation flow (manual / advisory)
+#   - EC-5:   nemoclaw user/process cannot leak the Tailscale auth key
 #   - EC-debug: no-network debug paths still work (manual)
 #
 # Exits non-zero if any non-advisory check fails.
@@ -204,26 +201,27 @@ else
   skip "3b — tailscale CLI not present"
 fi
 
-# ─── US1 acceptance: nemoclaw doctor ───────────────────────────────
+# ─── US1 acceptance: nemoclaw sandbox is Ready ─────────────────────
+#
+# Upstream NemoClaw's documented health command is `nemoclaw <sandbox>
+# status`, which prints the sandbox phase. "Ready" means OpenShell
+# gateway is healthy + the OpenClaw agent container is running. The
+# old `nemoclaw doctor` command from earlier project iterations does
+# not exist in upstream.
 
-section "US1 acceptance — nemoclaw doctor"
+section "US1 acceptance — nemoclaw sandbox Ready"
 
+NEMOCLAW_SANDBOX_NAME="${NEMOCLAW_SANDBOX_NAME:-nemoclaw}"
 if command -v tailscale >/dev/null 2>&1; then
-  if DOCTOR_OUT="$(tailscale ssh "$TAILNET_HOST" -- nemoclaw doctor 2>&1)"; then
-    pass "US1-4 — \`nemoclaw doctor\` exited 0"
+  STATUS_OUT="$(tailscale ssh "$TAILNET_HOST" -- "nemoclaw $NEMOCLAW_SANDBOX_NAME status 2>&1" 2>&1 || true)"
+  if grep -qE "Phase:\s*Ready" <<< "$STATUS_OUT"; then
+    pass "US1-4 — sandbox '$NEMOCLAW_SANDBOX_NAME' is Phase: Ready"
   else
-    # At US1 the credential handoff is not yet wired. If `nemoclaw
-    # doctor` fails *only* on a missing OPENAI_API_KEY, treat as
-    # advisory PASS for US1 — US2 wires the key.
-    if grep -qi "OPENAI_API_KEY\|missing.*key\|api.key" <<< "$DOCTOR_OUT"; then
-      skip "US1-4 — \`nemoclaw doctor\` failed on missing API key (expected at US1; US2 wires the credential handoff)"
-    else
-      fail "US1-4 — \`nemoclaw doctor\` failed for non-credential reason" \
-           "Output: $DOCTOR_OUT"
-    fi
+    fail "US1-4 — sandbox '$NEMOCLAW_SANDBOX_NAME' is not Ready" \
+         "Output (head): $(head -c 300 <<< "$STATUS_OUT") — inspect with \`tailscale ssh $TAILNET_HOST -- nemoclaw $NEMOCLAW_SANDBOX_NAME logs\`."
   fi
 else
-  skip "US1-4 — cannot run nemoclaw doctor without tailscale"
+  skip "US1-4 — cannot check sandbox status without tailscale CLI"
 fi
 
 # ─── SC-002: apply timing (advisory) ───────────────────────────────
@@ -234,14 +232,24 @@ skip "SC-002 — measure with \`time terraform apply -auto-approve\` from a fres
 
 # ─── SC-004: Principle II tooth-check ──────────────────────────────
 #
-# This is the load-bearing check for Phase 4. If 4c, 4d, or 4e match
-# the KV value, the deployment is in violation of constitution
-# Principle II and verify.sh exits non-zero.
+# Under the upstream NemoClaw architecture (verified against
+# docs/inference/inference-options.md), the sandbox runs as a Docker
+# container managed by OpenShell with Landlock + seccomp + a private
+# network namespace. The provider API key lives on the host in
+# OpenShell's persisted credentials (~/.nemoclaw/credentials.json,
+# mode 0600 owned by the operator user). The sandbox cannot read
+# the operator's home or talk to the provider directly.
 #
-# All checks run on the VM via Tailscale SSH so the secret value
-# never lands on the operator's workstation.
+# 4a: enumerate sandbox container PIDs (host-side view).
+# 4b: grep each container's /proc/<pid>/environ for the KV value.
+# 4c: grep each container's /proc/<pid>/cmdline for the KV value.
+# 4d: confirm the operator's credentials file IS protected (mode 0600).
+#
+# Sample-pass output: 4b/4c return zero matches AND 4d shows mode 0600.
+# Sample-fail output: 4b or 4c finds the KV value in any sandbox
+# container — Principle II violation, exit non-zero.
 
-section "SC-004 — Principle II tooth-check (sandboxed agent never sees KV value)"
+section "SC-004 — Principle II tooth-check (sandbox container never sees KV value)"
 
 if [[ -z "$KV_NAME" ]]; then
   fail "SC-004 — cannot run without key_vault_name terraform output" \
@@ -249,124 +257,70 @@ if [[ -z "$KV_NAME" ]]; then
 elif ! command -v tailscale >/dev/null 2>&1; then
   skip "SC-004 — tailscale CLI not present on this machine"
 else
-  # Wait for the unit to reach `active` before sampling. cloud-init
-  # starts it asynchronously; a fresh `terraform apply` may finish
-  # before NemoClaw's first `Type=notify` ready signal lands.
-  WAIT=0
-  while (( WAIT < 120 )); do
-    if tailscale ssh "$TAILNET_HOST" -- systemctl is-active --quiet nemoclaw.service 2>/dev/null; then
-      break
-    fi
-    sleep 5
-    WAIT=$((WAIT + 5))
-  done
-
-  if ! tailscale ssh "$TAILNET_HOST" -- systemctl is-active --quiet nemoclaw.service 2>/dev/null; then
-    fail "SC-004 — nemoclaw.service is not active after 120s" \
-         "Inspect via \`tailscale ssh $TAILNET_HOST -- sudo journalctl -u nemoclaw --no-pager -n 200\`. Common cause: foundry-api-key still holds the Terraform PLACEHOLDER (run \`az keyvault secret set --vault-name $KV_NAME --name foundry-api-key --value <real-key>\` then \`tailscale ssh $TAILNET_HOST -- sudo systemctl restart nemoclaw\`)."
+  KEY_VALUE="$(az keyvault secret show --vault-name "$KV_NAME" --name foundry-api-key --query value -o tsv 2>/dev/null || true)"
+  if [[ -z "$KEY_VALUE" ]]; then
+    skip "SC-004 — cannot read foundry-api-key from $KV_NAME (RBAC? not yet set?)"
+  elif [[ "$KEY_VALUE" == PLACEHOLDER* ]]; then
+    skip "SC-004 — foundry-api-key is still the Terraform PLACEHOLDER; tooth-check is meaningless until a real key is set"
   else
-    pass "SC-004 pre — nemoclaw.service is active (Type=notify ready signal observed)"
-
-    # 4b: tmpfs handoff file is gone after service start
-    HANDOFF_LS="$(tailscale ssh "$TAILNET_HOST" -- sudo ls /run/nemoclaw/env 2>&1 || true)"
-    if grep -qi "no such file" <<< "$HANDOFF_LS"; then
-      pass "4b — /run/nemoclaw/env unlinked after ExecStartPost"
+    # 4a: enumerate sandbox container PIDs. OpenShell-managed
+    # containers have label `openshell.role` or live under the
+    # `openshell` namespace in k3s. We use a permissive pattern
+    # (any container whose name contains "openshell" or "sandbox")
+    # and then narrow to running PIDs.
+    PIDS_OUT="$(
+      tailscale ssh "$TAILNET_HOST" -- 'sudo docker ps --format "{{.ID}}" --filter "name=openshell" --filter "name=sandbox" 2>/dev/null | xargs -r sudo docker inspect --format "{{.State.Pid}} {{.Name}}" 2>/dev/null' 2>&1 || true
+    )"
+    if [[ -z "$PIDS_OUT" ]]; then
+      skip "4a — no OpenShell sandbox containers found via docker ps; sandbox may not be Ready yet"
     else
-      fail "4b — /run/nemoclaw/env still exists after service start" \
-           "Output: $HANDOFF_LS — ExecStartPost=+/bin/rm -f did not run or failed."
-    fi
+      pass "4a — sandbox containers: $(head -c 200 <<< "$PIDS_OUT" | tr '\n' '|')"
 
-    # 4a: identify the sandboxed agent PID. NemoClaw upstream's
-    # documented sandbox-PID command is version-specific; the
-    # contract names it as a placeholder. Operator manually identifies
-    # the sandbox PID and re-runs SC-004 against it. We surface the
-    # systemd main PID + child tree so the operator has a starting
-    # point.
-    SVC_PID="$(tailscale ssh "$TAILNET_HOST" -- systemctl show -p MainPID --value nemoclaw.service 2>/dev/null | tr -d '\r' || true)"
-    if [[ -z "$SVC_PID" || "$SVC_PID" == "0" ]]; then
-      skip "4a — could not read MainPID for nemoclaw.service (service not running?)"
-    else
-      pass "4a — nemoclaw.service MainPID=$SVC_PID (NOTE: this is the *host* process, NOT the sandbox)"
-      printf "      Sandbox PID is NemoClaw-version-specific — identify per upstream docs and\n"
-      printf "      re-run 4c/4d against /proc/<sandbox-pid>/ to validate Principle II teeth.\n"
-    fi
-
-    # Fetch the secret value ONCE. We feed it into 4c/4d/4e via stdin
-    # over Tailscale SSH so it never lands on the operator's
-    # filesystem and never appears in argv (which would put it in
-    # /proc/<verify-pid>/cmdline).
-    KEY_VALUE="$(az keyvault secret show --vault-name "$KV_NAME" --name foundry-api-key --query value -o tsv 2>/dev/null || true)"
-    if [[ -z "$KEY_VALUE" ]]; then
-      skip "4c/4d/4e — cannot read foundry-api-key from $KV_NAME (RBAC? not yet set?)"
-    elif [[ "$KEY_VALUE" == PLACEHOLDER* ]]; then
-      skip "4c/4d/4e — foundry-api-key is still the Terraform PLACEHOLDER; tooth-check is meaningless until a real key is set"
-    else
-      # 4c: sandboxed agent's environ — manual until 4a is automated
-      skip "4c — manual: \`tailscale ssh $TAILNET_HOST -- sudo grep -aF '<KV-VALUE>' /proc/<sandbox-pid>/environ\` should return nothing (host process at PID $SVC_PID legitimately has the key)"
-
-      # 4d: sandboxed agent's cmdline
-      skip "4d — manual: \`tailscale ssh $TAILNET_HOST -- sudo grep -aF '<KV-VALUE>' /proc/<sandbox-pid>/cmdline\` should return nothing"
-
-      # 4e: persistent NemoClaw config dir contains no KV value. We
-      # can run this fully — it doesn't depend on knowing the
-      # sandbox PID. Pipe the secret value via stdin (`-`) and grep
-      # for it in /etc/nemoclaw/, /var/lib/nemoclaw/, and the
-      # NemoClaw install dir.
-      # shellcheck disable=SC2016 # single quotes are intentional —
-      # $kv must expand on the REMOTE bash (after `cat` reads stdin),
-      # not locally. The local secret value reaches the remote via
-      # the printf | tailscale-ssh pipeline, never as an argv.
-      MATCHES="$(
-        printf '%s' "$KEY_VALUE" \
-          | tailscale ssh "$TAILNET_HOST" -- sudo bash -c \
-              'kv=$(cat); grep -rlF -- "$kv" /etc/nemoclaw /var/lib/nemoclaw /opt/nemoclaw 2>/dev/null || true' \
-          || true
+      # 4b/4c: grep the sandbox containers' environ + cmdline for the
+      # KV value. Pipe the secret in via stdin so it never appears on
+      # this script's argv. The remote bash reads it once, then
+      # iterates the PIDs.
+      # shellcheck disable=SC2016 # single quotes intentional — vars
+      # expand on the REMOTE bash, not locally.
+      MATCHES_BC="$(
+        printf '%s' "$KEY_VALUE" | \
+          tailscale ssh "$TAILNET_HOST" -- sudo bash -c '
+            kv=$(cat)
+            for pid in $(docker ps --format "{{.ID}}" --filter name=openshell --filter name=sandbox | xargs -r docker inspect --format "{{.State.Pid}}"); do
+              if [[ -n "$pid" && "$pid" != "0" ]]; then
+                grep -aF -- "$kv" "/proc/$pid/environ" "/proc/$pid/cmdline" 2>/dev/null && echo "match in pid $pid"
+              fi
+            done
+          ' 2>&1 || true
       )"
-      if [[ -z "$MATCHES" ]]; then
-        pass "4e — no match for KV value in /etc/nemoclaw, /var/lib/nemoclaw, /opt/nemoclaw"
+      if [[ -z "$MATCHES_BC" ]]; then
+        pass "4b/4c — no match for KV value in sandbox-container environ or cmdline"
       else
-        fail "4e — KV value found in persistent on-disk config" \
-             "Files: $MATCHES — Principle II violation. NemoClaw must not write the Foundry key to disk."
+        fail "4b/4c — KV value found in a sandbox container's process state" \
+             "$MATCHES_BC — Principle II violation. The OpenShell intercept design must keep the key on the host only."
       fi
-      unset KEY_VALUE
+
+      # 4d: operator's credentials file should be 0600.
+      CRED_MODE="$(tailscale ssh "$TAILNET_HOST" -- sudo stat -c '%a %U %G' /home/azureuser/.nemoclaw/credentials.json 2>&1 || true)"
+      if [[ "$CRED_MODE" =~ ^600\ azureuser\ azureuser ]]; then
+        pass "4d — ~/.nemoclaw/credentials.json is mode 0600 owned by azureuser (operator-only)"
+      else
+        fail "4d — ~/.nemoclaw/credentials.json has unexpected perms" \
+             "Output: $CRED_MODE — should be '600 azureuser azureuser'."
+      fi
     fi
-  fi
-fi
-
-# ─── EC-4: tmpfs handoff file unlinked promptly ────────────────────
-#
-# Restart the unit and observe the env file's brief lifetime. The
-# file should appear during ExecStartPre and disappear by
-# ExecStartPost. Bounded to a 30s observation window.
-
-section "EC-4 — tmpfs handoff file unlinked promptly"
-
-if [[ -z "$KV_NAME" ]] || ! command -v tailscale >/dev/null 2>&1; then
-  skip "EC-4 — requires tailscale + valid KV"
-else
-  # Trigger a fresh restart so we know the handoff cycle just ran.
-  if tailscale ssh "$TAILNET_HOST" -- sudo systemctl restart nemoclaw.service 2>/dev/null; then
-    pass "EC-4 pre — restart issued"
-    # Sample for up to 30s; at the end the file must be gone.
-    sleep 10
-    POST_LS="$(tailscale ssh "$TAILNET_HOST" -- sudo ls /run/nemoclaw/env 2>&1 || true)"
-    if grep -qi "no such file" <<< "$POST_LS"; then
-      pass "EC-4 — /run/nemoclaw/env not present 10s after restart"
-    else
-      fail "EC-4 — /run/nemoclaw/env still present 10s after restart" \
-           "Output: $POST_LS — ExecStartPost cleanup did not fire."
-    fi
-  else
-    fail "EC-4 — could not restart nemoclaw.service via Tailscale SSH"
+    unset KEY_VALUE
   fi
 fi
 
 # ─── SC-008: Key Vault audit landing ───────────────────────────────
 #
-# After the EC-4 restart we expect a fresh SecretGet event in
-# AzureDiagnostics within 5 minutes. We poll up to 5 minutes; if no
-# event appears, fail. Requires `az monitor log-analytics` extension
-# (azure-cli installs it on first use; we check explicitly).
+# Every KV SecretGet operation is logged by Azure to the diagnostic
+# settings → Log Analytics workspace. Cloud-init's 05-nemoclaw.sh
+# triggers exactly one SecretGet for foundry-api-key during install,
+# plus one per Tailscale auth-key fetch in 01-tailscale.sh. After a
+# successful apply the LA workspace should have at least two recent
+# SecretGet records from the VM's managed identity.
 
 section "SC-008 — Key Vault audit landing"
 
@@ -416,7 +370,7 @@ fi
 
 section "EC-2 — Foundry key rotation (manual)"
 
-skip "EC-2 — manual: \`az keyvault secret set --vault-name $KV_NAME --name foundry-api-key --value <new-key>\` then \`tailscale ssh $TAILNET_HOST -- sudo systemctl restart nemoclaw\`; confirm a fresh inference call succeeds with the new key. No code change needed; see contracts/credential-handoff.md §'Failure-mode coverage matrix'."
+skip "EC-2 — manual rotation flow: (1) \`az keyvault secret set --vault-name $KV_NAME --name foundry-api-key --value <new-key>\`; (2) on the VM via Tailscale SSH, \`nemoclaw credentials reset COMPATIBLE_API_KEY\` then \`nemoclaw onboard\` (interactive — paste the new key when prompted); (3) re-test inference. The OpenShell-on-host model means rotation isn't automatic on KV update — operator triggers reload via the documented credentials-reset flow. See docs/THREAT_MODEL.md §'Mediation channel'."
 
 # ─── SC-005: cost reminder (advisory) ──────────────────────────────
 #
