@@ -122,36 +122,59 @@ echo "[05-nemoclaw] running NemoClaw installer pinned to $NEMOCLAW_VERSION"
 INSTALLER_LOG="$OPERATOR_HOME/.nemoclaw/installer.log"
 install -m 0600 -o "$NEMOCLAW_OPERATOR_USER" -g "$NEMOCLAW_OPERATOR_USER" /dev/null "$INSTALLER_LOG"
 
-# Construct the env block for the installer. We keep the API key in
-# a single env var so it doesn't bleed into the surrounding shell's
-# `env` listing or get logged by `set -x` in subshells.
-export FOUNDRY_API_KEY
+# Avoid bash quoting hell by writing a runner script with the
+# (operator-readable) env vars baked in plus the API key piped via
+# stdin. The runner is mode 0500 owned by the operator user — only
+# they can read or execute it.
+#
+# Why pipe the API key over stdin instead of bake-into-runner: the
+# runner script is on disk for the duration of the install, and
+# even with 0500 perms, baking the key in means it briefly lives
+# at rest. Stdin keeps the key in process memory only, dies with
+# the script.
+RUNNER="$OPERATOR_HOME/.nemoclaw/installer-runner.sh"
+install -m 0500 -o "$NEMOCLAW_OPERATOR_USER" -g "$NEMOCLAW_OPERATOR_USER" /dev/null "$RUNNER"
+cat > "$RUNNER" <<RUNNER_EOF
+#!/usr/bin/env bash
+set -euo pipefail
+cd "\$HOME"
 
-runuser -l "$NEMOCLAW_OPERATOR_USER" -- bash -c '
-  set -euo pipefail
-  cd "$HOME"
-  curl -fsSL https://www.nvidia.com/nemoclaw.sh | \
-    NEMOCLAW_INSTALL_TAG='"'$NEMOCLAW_VERSION'"' \
-    NEMOCLAW_NON_INTERACTIVE=1 \
-    NEMOCLAW_ACCEPT_THIRD_PARTY_SOFTWARE=1 \
-    NEMOCLAW_PROVIDER=custom \
-    NEMOCLAW_MODEL='"'$FOUNDRY_MODEL'"' \
-    NEMOCLAW_SANDBOX_NAME='"'$NEMOCLAW_SANDBOX_NAME'"' \
-    NEMOCLAW_POLICY_MODE='"'$NEMOCLAW_POLICY_MODE'"' \
-    COMPATIBLE_API_KEY="$FOUNDRY_API_KEY" \
-    COMPATIBLE_BASE_URL='"'$FOUNDRY_BASE_URL'"' \
-    bash 2>&1
-' >> "$INSTALLER_LOG" 2>&1 || {
+# Read the API key from stdin (one line), so it never lands on
+# disk in this script's source.
+read -r FOUNDRY_API_KEY
+
+curl -fsSL https://www.nvidia.com/nemoclaw.sh | \
+  NEMOCLAW_INSTALL_TAG="${NEMOCLAW_VERSION}" \
+  NEMOCLAW_NON_INTERACTIVE=1 \
+  NEMOCLAW_ACCEPT_THIRD_PARTY_SOFTWARE=1 \
+  NEMOCLAW_PROVIDER=custom \
+  NEMOCLAW_MODEL="${FOUNDRY_MODEL}" \
+  NEMOCLAW_SANDBOX_NAME="${NEMOCLAW_SANDBOX_NAME}" \
+  NEMOCLAW_POLICY_MODE="${NEMOCLAW_POLICY_MODE}" \
+  COMPATIBLE_API_KEY="\$FOUNDRY_API_KEY" \
+  NEMOCLAW_ENDPOINT_URL="${FOUNDRY_BASE_URL}" \
+  bash 2>&1
+
+unset FOUNDRY_API_KEY
+RUNNER_EOF
+chown "$NEMOCLAW_OPERATOR_USER:$NEMOCLAW_OPERATOR_USER" "$RUNNER"
+
+# Pipe the secret to the runner via stdin under runuser. The key
+# never appears in this script's argv, env (after the unset below),
+# or in the runner script itself.
+if ! printf '%s\n' "$FOUNDRY_API_KEY" | runuser -l "$NEMOCLAW_OPERATOR_USER" -- "$RUNNER" >> "$INSTALLER_LOG" 2>&1; then
   echo "[05-nemoclaw] FATAL: installer failed. See $INSTALLER_LOG (last 80 lines):" >&2
   tail -n 80 "$INSTALLER_LOG" >&2
   unset FOUNDRY_API_KEY
+  rm -f "$RUNNER"
   exit 1
-}
+fi
 
-# Scrub the API key from this script's environment. The installer
-# has handed it to OpenShell which persisted it; we don't need it
-# in this process anymore.
+# Scrub the API key from this script's environment + remove the
+# runner script (it has no value once install is done; the key is
+# now persisted in OpenShell's config under ~/.nemoclaw/).
 unset FOUNDRY_API_KEY
+rm -f "$RUNNER"
 
 # ─── Smoke test: nemoclaw status as the operator ──────────────────
 #
